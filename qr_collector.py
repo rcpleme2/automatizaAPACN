@@ -55,6 +55,11 @@ def _extrair_chave(dado: str) -> Optional[str]:
     if m:
         return m.group(1)
 
+    # Chave digitada ou emitida com espaços/hífens entre grupos (ex: "4126 0313 ...")
+    apenas_digitos = re.sub(r'[\s\-]', '', dado)
+    if re.match(r'^\d{44}$', apenas_digitos):
+        return apenas_digitos
+
     return None
 
 

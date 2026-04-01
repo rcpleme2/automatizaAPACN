@@ -37,9 +37,10 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
-URL_NOTA_PARANA = "https://www.notaparana.pr.gov.br/"
-TIMEOUT_PADRAO  = 30_000   # ms
-TIMEOUT_CURTO   = 5_000    # ms – para checagem opcional de modais
+URL_NOTA_PARANA  = "https://www.notaparana.pr.gov.br/"
+URL_LOGIN_DIRETO = "https://identidade.sefa.pr.gov.br/nidp/app/login"
+TIMEOUT_PADRAO   = 30_000   # ms
+TIMEOUT_CURTO    =  5_000   # ms – para checagem opcional de modais
 
 
 # ---------------------------------------------------------------------------
@@ -64,27 +65,88 @@ def _so_digitos(texto: str) -> str:
 # Etapas da automação
 # ---------------------------------------------------------------------------
 
+def _fechar_popup_cookies(page: Page) -> None:
+    """
+    Tenta fechar banners de consentimento de cookies.
+    Silencioso: não falha se nenhum popup estiver presente.
+    """
+    seletores_botao = [
+        # Seletores específicos de frameworks de cookie comuns
+        "#acceptCookies", "#accept-cookies", "#btnAceitarCookies",
+        ".cookie-accept", ".btn-cookie-accept",
+        # Texto do botão – Playwright resolve case-insensitive via regex
+    ]
+    textos_botao = re.compile(
+        r"^(aceitar( todos)?|concordo|ok|entendi|permitir( todos)?)$",
+        re.IGNORECASE,
+    )
+
+    # 1. Tenta por seletores CSS conhecidos
+    for seletor in seletores_botao:
+        try:
+            btn = page.locator(seletor).first
+            btn.wait_for(state="visible", timeout=1_500)
+            btn.click()
+            log.info(f"Popup de cookies fechado via seletor: {seletor}")
+            page.wait_for_load_state("domcontentloaded")
+            return
+        except PlaywrightTimeout:
+            continue
+
+    # 2. Tenta por texto do botão dentro de containers comuns de cookie
+    try:
+        btn = page.locator(
+            "div[class*='cookie'] button, div[id*='cookie'] button, "
+            "#cookieBar button, .lgpd button, [class*='lgpd'] button, "
+            "[class*='consent'] button"
+        ).filter(has_text=textos_botao).first
+        btn.wait_for(state="visible", timeout=1_500)
+        btn.click()
+        log.info("Popup de cookies fechado via texto do botão.")
+        page.wait_for_load_state("domcontentloaded")
+        return
+    except PlaywrightTimeout:
+        pass
+
+    log.debug("Nenhum popup de cookies detectado.")
+
+
 def _fazer_login(page: Page, usuario: str, senha: str) -> None:
     """Navega até o login e autentica o usuário."""
     log.info("Acessando portal Nota Paraná...")
     page.goto(URL_NOTA_PARANA, wait_until="domcontentloaded")
+    _fechar_popup_cookies(page)
 
     # Tenta clicar no botão "Acessar" da home (redireciona para Identidade SEFA)
+    na_pagina_login = False
     try:
-        page.get_by_role("link", name=re.compile(r"acessar", re.IGNORECASE)).first.click()
+        btn_acessar = page.locator(
+            "a, button"
+        ).filter(has_text=re.compile(r"^acessar$", re.IGNORECASE)).first
+        btn_acessar.wait_for(state="visible", timeout=TIMEOUT_CURTO)
+        btn_acessar.click()
         page.wait_for_load_state("domcontentloaded")
+        _fechar_popup_cookies(page)
+        na_pagina_login = True
     except PlaywrightTimeout:
-        log.warning("Botão 'Acessar' não encontrado na home; tentando URL de login direta.")
+        log.warning("Botão 'Acessar' não encontrado na home; navegando diretamente para login.")
+
+    # Fallback: vai direto para a URL de login da Identidade SEFA
+    if not na_pagina_login or page.locator("#attribute").count() == 0:
+        log.info(f"Navegando para: {URL_LOGIN_DIRETO}")
+        page.goto(URL_LOGIN_DIRETO, wait_until="domcontentloaded")
+        _fechar_popup_cookies(page)
 
     log.info("Preenchendo credenciais...")
-    # Campo usuário (CPF/CNPJ) – atributo id="attribute" conforme PRD
+    # Campo usuário (CPF/CNPJ) – id="attribute" (Identidade SEFA-PR)
     campo_usuario = page.locator("#attribute")
     campo_usuario.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
-    campo_usuario.fill("")          # limpa explicitamente
+    # Força limpeza via JavaScript para evitar concatenação de valores
+    page.evaluate("document.querySelector('#attribute').value = ''")
     campo_usuario.fill(usuario)
 
     campo_senha = page.locator("#password")
-    campo_senha.fill("")
+    page.evaluate("document.querySelector('#password').value = ''")
     campo_senha.fill(senha)
 
     page.get_by_role("button", name=re.compile(r"acessar", re.IGNORECASE)).click()
@@ -99,7 +161,7 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
             "       Corrija NOTAPARANA_USER e NOTAPARANA_PASSWORD no arquivo .env."
         )
     except PlaywrightTimeout:
-        pass  # mensagem de erro não apareceu – login provavelmente ok
+        pass  # mensagem de erro não apareceu – login ok
 
     log.info("Login realizado com sucesso.")
 

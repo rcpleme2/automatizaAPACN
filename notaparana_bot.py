@@ -38,6 +38,7 @@ log = logging.getLogger(__name__)
 # Constantes
 # ---------------------------------------------------------------------------
 URL_LOGIN_DIRETO = "https://notaparana.pr.gov.br/"
+URL_SAIR         = "https://notaparana.pr.gov.br/nfprweb/publico/sair"
 TIMEOUT_PADRAO   = 30_000   # ms
 TIMEOUT_CURTO    =  5_000   # ms – para checagem opcional de modais
 
@@ -110,17 +111,15 @@ def _fechar_popup_cookies(page: Page) -> None:
     log.debug("Nenhum popup de cookies detectado.")
 
 
-def _fazer_login(page: Page, usuario: str, senha: str) -> None:
-    """Navega direto para a página de autenticação e realiza o login."""
+def _tentar_login(page: Page, usuario: str, senha: str) -> None:
+    """Preenche e submete o formulário de login uma única vez."""
     log.info(f"Acessando página de autenticação: {URL_LOGIN_DIRETO}")
     page.goto(URL_LOGIN_DIRETO, wait_until="domcontentloaded")
     _fechar_popup_cookies(page)
 
     log.info("Preenchendo credenciais...")
-    # Campo usuário (CPF/CNPJ) – id="attribute" (Identidade SEFA-PR)
     campo_usuario = page.locator("#attribute")
     campo_usuario.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
-    # Força limpeza via JavaScript para evitar concatenação de valores
     page.evaluate("document.querySelector('#attribute').value = ''")
     campo_usuario.fill(usuario)
 
@@ -128,23 +127,60 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
     page.evaluate("document.querySelector('#password').value = ''")
     campo_senha.fill(senha)
 
-    # Aguarda 2 s após preencher para que validações da página se estabilizem
     log.info("Aguardando antes de submeter...")
     page.wait_for_timeout(2_000)
 
     page.get_by_role("button", name=re.compile(r"acessar", re.IGNORECASE)).click()
     page.wait_for_load_state("domcontentloaded")
 
-    # Verifica mensagem de erro de login
+
+def _fazer_login(page: Page, usuario: str, senha: str) -> None:
+    """
+    Realiza o login com tratamento de sessão duplicada.
+
+    Se após o login aparecer a mensagem de múltiplas sessões ativas,
+    encerra a sessão anterior via URL de saída e tenta o login novamente.
+    """
+    _tentar_login(page, usuario, senha)
+
+    # Verifica credenciais inválidas
     try:
-        erro = page.locator("text=Usuário/Senha inválido.").first
-        erro.wait_for(state="visible", timeout=TIMEOUT_CURTO)
+        page.locator("text=Usuário/Senha inválido.").first.wait_for(
+            state="visible", timeout=TIMEOUT_CURTO
+        )
         sys.exit(
             "[ERRO] Login falhou: credenciais inválidas (Usuário/Senha inválido.).\n"
             "       Corrija NOTAPARANA_USER e NOTAPARANA_PASSWORD no arquivo .env."
         )
     except PlaywrightTimeout:
-        pass  # mensagem de erro não apareceu – login ok
+        pass
+
+    # Verifica sessão duplicada
+    try:
+        page.locator(
+            "text=Ops! O usuário autenticado possui mais de uma sessão ativa."
+        ).first.wait_for(state="visible", timeout=TIMEOUT_CURTO)
+
+        log.warning("Sessão duplicada detectada. Encerrando sessão anterior...")
+        page.goto(URL_SAIR, wait_until="load")
+        log.info("Sessão encerrada. Realizando novo login...")
+
+        _tentar_login(page, usuario, senha)
+
+        # Segunda verificação de credenciais inválidas após relogin
+        try:
+            page.locator("text=Usuário/Senha inválido.").first.wait_for(
+                state="visible", timeout=TIMEOUT_CURTO
+            )
+            sys.exit(
+                "[ERRO] Login falhou após relogin: credenciais inválidas.\n"
+                "       Corrija NOTAPARANA_USER e NOTAPARANA_PASSWORD no arquivo .env."
+            )
+        except PlaywrightTimeout:
+            pass
+
+    except PlaywrightTimeout:
+        pass  # mensagem de sessão duplicada não apareceu – ok
 
     log.info("Login realizado com sucesso.")
 

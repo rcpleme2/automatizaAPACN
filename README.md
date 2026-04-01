@@ -1,16 +1,17 @@
 # automatizaAPACN
 
-Sistema de coleta de QR codes de notas fiscais do Paraná e envio automático para doação no portal **Nota Paraná**.
+Sistema de coleta de notas fiscais do Paraná via leitor de QR code/código de barras e envio automático para doação no portal **Nota Paraná**.
 
 ## Visão geral do fluxo
 
 ```
-[ Câmera ] ──QR codes──▶ [ Validação ] ──chaves──▶ [ Confirmação ] ──▶ [ Playwright → Nota Paraná ]
+[ Leitor QR/Barcode ] ──leitura──▶ [ Validação ] ──chaves──▶ [ Confirmação ] ──▶ [ Playwright → Nota Paraná ]
 ```
 
-1. **Coleta** – A câmera lê os QR codes das notas; cada chave de acesso (44 dígitos) é validada em tempo real.
-2. **Confirmação** – O operador revisa as chaves antes de prosseguir.
+1. **Coleta** – O operador passa o leitor USB nos QR codes/códigos de barras das notas. Cada chave é validada na hora.
+2. **Confirmação** – O operador revisa a lista antes de prosseguir.
 3. **Doação automática** – O script faz login no portal e preenche o formulário de doação manual para cada chave.
+4. **Resultado** – Aviso visual na tela informa quantas notas foram doadas com sucesso.
 
 ---
 
@@ -19,8 +20,10 @@ Sistema de coleta de QR codes de notas fiscais do Paraná e envio automático pa
 | Dependência | Instalação |
 |---|---|
 | Python 3.11+ | `python3 --version` |
-| libzbar (pyzbar) | `sudo apt-get install libzbar0` (Linux) |
 | Playwright Chromium | `playwright install chromium` |
+| Leitor de QR/barcode USB | Qualquer modelo que emule teclado (HID) |
+
+> **Não é necessária webcam.** O leitor USB funciona como teclado: ao escanear, ele digita o código e tecla ENTER automaticamente.
 
 ---
 
@@ -70,37 +73,38 @@ python main.py
 ### Opções disponíveis
 
 ```
-python main.py [--headless] [--camera INDICE]
+python main.py [--headless]
 
-  --headless        Executa o navegador sem janela gráfica
-  --camera INDICE   Índice da câmera (padrão: 0)
+  --headless   Executa o navegador sem janela gráfica
 ```
 
-### Somente coleta de QR codes (teste)
+### Como usar durante a coleta
+
+1. Execute `python main.py` no terminal.
+2. Aponte o leitor para o QR code ou código de barras de cada nota.
+3. O leitor lê e envia automaticamente — a nota aparece listada na tela.
+4. Para **encerrar**: leia um QR com o texto `FIM`, ou pressione **ENTER** com o campo vazio.
+5. Confirme a lista exibida digitando **S** + ENTER.
+6. Aguarde o envio automático. Ao final, um aviso mostra quantas notas foram doadas.
+
+### Somente coleta (teste sem doação)
 
 ```bash
 python qr_collector.py
 ```
 
-#### Controles durante a coleta
-
-| Tecla | Ação |
-|---|---|
-| `Q` | Finaliza a coleta e avança para a doação |
-| `R` | Remove a última chave adicionada (desfaz leitura) |
-
 ---
 
 ## Validação das chaves de acesso
 
-Cada QR code passa pelas seguintes verificações antes de ser aceito:
+Cada código escaneado passa pelas seguintes verificações antes de ser aceito:
 
 - Possui exatamente **44 dígitos numéricos**
 - `cUF = 41` (estado do **Paraná**)
 - Modelo `55` (NF-e) ou `65` (NFC-e)
 - Dígito verificador correto (Módulo 11, conforme manual SEFAZ)
 
-Chaves duplicadas ou inválidas são descartadas com aviso no console.
+Leituras duplicadas ou inválidas são descartadas com aviso imediato na tela.
 
 ---
 
@@ -109,7 +113,7 @@ Chaves duplicadas ou inválidas são descartadas com aviso no console.
 ```
 automatizaAPACN/
 ├── main.py              # Ponto de entrada – orquestra o fluxo completo
-├── qr_collector.py      # Leitura de QR codes via câmera + validação
+├── qr_collector.py      # Coleta via leitor HID + validação de chaves
 ├── notaparana_bot.py    # Automação Playwright do portal Nota Paraná
 ├── requirements.txt     # Dependências Python
 ├── .env.example         # Modelo do arquivo de configuração

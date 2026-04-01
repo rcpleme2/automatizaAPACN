@@ -1,198 +1,86 @@
 """
 qr_collector.py
 ---------------
-Módulo de coleta e validação de chaves de acesso NF-e/NFC-e a partir
-de QR codes lidos pela câmera.
+Coleta de chaves de acesso NF-e/NFC-e a partir de um leitor de código
+de barras / QR code USB (modo HID – emula teclado).
 
-Uso:
-    python qr_collector.py
+O leitor envia o conteúdo escaneado seguido de ENTER automaticamente.
+Basta apontar para os códigos; nenhuma interação adicional é necessária.
 
-Controles durante a coleta:
-    Q  – Finaliza a coleta e retorna as chaves válidas coletadas.
-    R  – Remove a última chave adicionada (desfaz última leitura).
+Para encerrar a coleta: pressione ENTER com o campo vazio, ou
+                        leia um QR/código com o texto "FIM".
 """
 
 import re
+import os
 import sys
-import time
-from dataclasses import dataclass, field
 from typing import Optional
 
-import cv2
-from pyzbar import pyzbar
-
-
 # ---------------------------------------------------------------------------
-# Estrutura de estado da coleta
+# Cores ANSI (funcionam em Linux/macOS; no Windows requer terminal moderno)
 # ---------------------------------------------------------------------------
+_VERDE   = "\033[92m"
+_VERMELHO = "\033[91m"
+_AMARELO = "\033[93m"
+_AZUL    = "\033[94m"
+_NEGRITO = "\033[1m"
+_RESET   = "\033[0m"
 
-@dataclass
-class Coleta:
-    chaves: list[str] = field(default_factory=list)
-    invalidas: list[str] = field(default_factory=list)
-    ultima_leitura: float = 0.0          # timestamp do último QR lido
-    debounce_seg: float = 2.0            # evita duplicar leitura imediata
+
+def _cor(texto: str, cor: str) -> str:
+    return f"{cor}{texto}{_RESET}"
 
 
 # ---------------------------------------------------------------------------
 # Funções de extração e validação
 # ---------------------------------------------------------------------------
 
-# Dígitos de cUF do Paraná = 41
-_CUFS_VALIDOS = {"41"}
+_CUFS_VALIDOS = {"41"}   # cUF do Paraná
 
-def _extrair_chave(dado_qr: str) -> Optional[str]:
-    """Tenta extrair uma chave de acesso de 44 dígitos do conteúdo do QR."""
-    # QR de NFC-e Paraná: URL com parâmetro ?p=CHAVE44DIGITOS|...
-    m = re.search(r'[?&]p=(\d{44})', dado_qr)
+
+def _extrair_chave(dado: str) -> Optional[str]:
+    """Extrai a chave de acesso de 44 dígitos de qualquer formato de QR/barcode."""
+    # NFC-e Paraná: URL com ?p=CHAVE44|...
+    m = re.search(r'[?&]p=(\d{44})', dado)
     if m:
         return m.group(1)
 
-    # Alternativa: parâmetro chNFe=
-    m = re.search(r'chNFe=(\d{44})', dado_qr, re.IGNORECASE)
+    # Parâmetro chNFe= em URL
+    m = re.search(r'chNFe=(\d{44})', dado, re.IGNORECASE)
     if m:
         return m.group(1)
 
-    # Chave solta no QR (44 dígitos isolados)
-    m = re.search(r'(?<!\d)(\d{44})(?!\d)', dado_qr)
+    # Sequência pura de 44 dígitos (código de barras linear ou QR simples)
+    m = re.search(r'(?<!\d)(\d{44})(?!\d)', dado)
     if m:
         return m.group(1)
 
     return None
 
 
-def _calcular_digito_verificador(chave43: str) -> int:
-    """Módulo 11 conforme manual do SEFAZ para chave de acesso NF-e."""
-    pesos = list(range(2, 10)) * 6          # [2,3,...,9, 2,3,...,9, ...]
+def _calcular_dv(chave43: str) -> int:
+    """Dígito verificador Módulo 11 conforme manual SEFAZ."""
+    pesos = list(range(2, 10)) * 6
     soma = sum(int(d) * p for d, p in zip(reversed(chave43), pesos))
     resto = soma % 11
     return 0 if resto < 2 else 11 - resto
 
 
 def validar_chave(chave: str) -> tuple[bool, str]:
-    """
-    Valida uma chave de acesso NF-e.
-
-    Retorna (True, "") se válida, ou (False, motivo) se inválida.
-    """
+    """Retorna (True, '') se válida, ou (False, motivo) se inválida."""
     if not re.match(r'^\d{44}$', chave):
-        return False, "Não possui exatamente 44 dígitos numéricos"
+        return False, "precisa ter exatamente 44 dígitos numéricos"
 
-    cuf = chave[:2]
-    if cuf not in _CUFS_VALIDOS:
-        return False, f"cUF '{cuf}' não corresponde ao Paraná (esperado '41')"
+    if chave[:2] not in _CUFS_VALIDOS:
+        return False, f"código de estado '{chave[:2]}' não é o Paraná (esperado 41)"
 
-    mod = chave[20:22]
-    if mod not in ("55", "65"):
-        return False, f"Modelo '{mod}' desconhecido (esperado 55=NF-e ou 65=NFC-e)"
+    if chave[20:22] not in ("55", "65"):
+        return False, f"modelo '{chave[20:22]}' desconhecido (esperado 55=NF-e, 65=NFC-e)"
 
-    dv_calculado = _calcular_digito_verificador(chave[:43])
-    dv_nota = int(chave[43])
-    if dv_calculado != dv_nota:
-        return False, (
-            f"Dígito verificador incorreto "
-            f"(calculado={dv_calculado}, nota={dv_nota})"
-        )
+    if _calcular_dv(chave[:43]) != int(chave[43]):
+        return False, "dígito verificador inválido (código corrompido?)"
 
     return True, ""
-
-
-# ---------------------------------------------------------------------------
-# Loop de coleta via câmera
-# ---------------------------------------------------------------------------
-
-def coletar_qr_codes(indice_camera: int = 0) -> list[str]:
-    """
-    Abre a câmera e aguarda o operador escanear QR codes de notas fiscais.
-
-    Retorna lista com as chaves de acesso válidas e únicas coletadas.
-    """
-    cap = cv2.VideoCapture(indice_camera)
-    if not cap.isOpened():
-        sys.exit(
-            f"[ERRO] Não foi possível abrir a câmera de índice {indice_camera}. "
-            "Verifique se há uma webcam conectada."
-        )
-
-    estado = Coleta()
-    print("\n" + "=" * 60)
-    print("  COLETOR DE QR CODES – NOTA FISCAL PARANÁ")
-    print("=" * 60)
-    print("  Q  → Finalizar coleta")
-    print("  R  → Remover última chave adicionada")
-    print("=" * 60 + "\n")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("[AVISO] Falha ao capturar frame da câmera.")
-            continue
-
-        qr_codes = pyzbar.decode(frame)
-        agora = time.time()
-
-        for qr in qr_codes:
-            dado = qr.data.decode("utf-8", errors="replace").strip()
-
-            # debounce: ignora releituras muito rápidas
-            if agora - estado.ultima_leitura < estado.debounce_seg:
-                continue
-
-            chave = _extrair_chave(dado)
-            if chave is None:
-                print(f"[IGNORADO] QR sem chave de acesso detectável: {dado[:80]}")
-                estado.ultima_leitura = agora
-                continue
-
-            if chave in estado.chaves:
-                print(f"[DUPLICADO] Chave já registrada: {_fmt(chave)}")
-                estado.ultima_leitura = agora
-                continue
-
-            valida, motivo = validar_chave(chave)
-            if not valida:
-                print(f"[INVÁLIDA]  {_fmt(chave)}  ← {motivo}")
-                if chave not in estado.invalidas:
-                    estado.invalidas.append(chave)
-                estado.ultima_leitura = agora
-                continue
-
-            estado.chaves.append(chave)
-            estado.ultima_leitura = agora
-            print(
-                f"[OK #{len(estado.chaves):>3}]  {_fmt(chave)}"
-            )
-
-            # Desenha contorno verde no QR detectado
-            pts = qr.polygon
-            if len(pts) == 4:
-                for i in range(4):
-                    cv2.line(frame, pts[i], pts[(i + 1) % 4], (0, 255, 0), 3)
-
-        # Overlay de status no frame
-        _draw_status(frame, estado)
-        cv2.imshow("Coletor QR – Nota Paraná  (Q=finalizar | R=desfazer)", frame)
-
-        tecla = cv2.waitKey(1) & 0xFF
-        if tecla == ord('q') or tecla == ord('Q'):
-            break
-        elif tecla == ord('r') or tecla == ord('R'):
-            if estado.chaves:
-                removida = estado.chaves.pop()
-                print(f"[REMOVIDA]  {_fmt(removida)}")
-            else:
-                print("[INFO] Nenhuma chave para remover.")
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-    print("\n" + "=" * 60)
-    print(f"  Coleta encerrada.")
-    print(f"  Chaves válidas  : {len(estado.chaves)}")
-    print(f"  Chaves inválidas: {len(estado.invalidas)}")
-    print("=" * 60 + "\n")
-
-    return estado.chaves
 
 
 # ---------------------------------------------------------------------------
@@ -200,17 +88,99 @@ def coletar_qr_codes(indice_camera: int = 0) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _fmt(chave: str) -> str:
-    """Formata a chave em grupos legíveis: 4444 4444 4444 ..."""
+    """Formata a chave em grupos de 4 dígitos para facilitar leitura."""
     return " ".join(chave[i:i+4] for i in range(0, 44, 4))
 
 
-def _draw_status(frame, estado: Coleta) -> None:
-    """Escreve o contador de chaves no canto superior esquerdo do frame."""
-    texto = f"Coletadas: {len(estado.chaves)}  |  Q=Finalizar  R=Desfazer"
-    cv2.putText(
-        frame, texto, (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 0), 2, cv2.LINE_AA
-    )
+def _limpar_tela() -> None:
+    os.system("cls" if os.name == "nt" else "clear")
+
+
+def _cabecalho(total: int, invalidas: int) -> None:
+    _limpar_tela()
+    print(_cor("=" * 62, _AZUL))
+    print(_cor("   LEITOR DE NOTAS FISCAIS – NOTA PARANÁ", _NEGRITO))
+    print(_cor("=" * 62, _AZUL))
+    print(f"   Notas registradas : {_cor(str(total), _VERDE)}")
+    if invalidas:
+        print(f"   Leituras inválidas: {_cor(str(invalidas), _VERMELHO)}")
+    print(_cor("-" * 62, _AZUL))
+    print("   Aponte o leitor para o QR code ou código de barras da nota.")
+    print("   Para FINALIZAR: leia um código 'FIM' ou tecle ENTER vazio.")
+    print(_cor("=" * 62, _AZUL))
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Loop principal de coleta
+# ---------------------------------------------------------------------------
+
+def coletar_qr_codes() -> list[str]:
+    """
+    Aguarda leituras do leitor de código de barras/QR (entrada via teclado HID).
+
+    Retorna lista de chaves de acesso válidas e únicas.
+    """
+    chaves: list[str] = []
+    invalidas: int = 0
+    historico: list[str] = []   # log de mensagens de feedback
+
+    _cabecalho(0, 0)
+
+    while True:
+        try:
+            entrada = input("   > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        # Sinaliza fim da coleta
+        if entrada == "" or entrada.upper() == "FIM":
+            break
+
+        chave = _extrair_chave(entrada)
+
+        if chave is None:
+            invalidas += 1
+            msg = _cor(f"  ✗  Código não reconhecido: {entrada[:60]}", _VERMELHO)
+            historico.append(msg)
+            _cabecalho(len(chaves), invalidas)
+            for linha in historico[-15:]:   # mostra as últimas 15 mensagens
+                print(linha)
+            continue
+
+        if chave in chaves:
+            msg = _cor(
+                f"  ⚠  Nota já registrada (ignorada): {_fmt(chave)}",
+                _AMARELO
+            )
+            historico.append(msg)
+            _cabecalho(len(chaves), invalidas)
+            for linha in historico[-15:]:
+                print(linha)
+            continue
+
+        valida, motivo = validar_chave(chave)
+        if not valida:
+            invalidas += 1
+            msg = _cor(f"  ✗  Chave inválida ({motivo}): {_fmt(chave)}", _VERMELHO)
+            historico.append(msg)
+            _cabecalho(len(chaves), invalidas)
+            for linha in historico[-15:]:
+                print(linha)
+            continue
+
+        chaves.append(chave)
+        msg = _cor(
+            f"  ✓  #{len(chaves):>3}  {_fmt(chave)}",
+            _VERDE
+        )
+        historico.append(msg)
+        _cabecalho(len(chaves), invalidas)
+        for linha in historico[-15:]:
+            print(linha)
+
+    return chaves
 
 
 # ---------------------------------------------------------------------------
@@ -219,9 +189,8 @@ def _draw_status(frame, estado: Coleta) -> None:
 
 if __name__ == "__main__":
     chaves = coletar_qr_codes()
+    print()
     if chaves:
-        print("Chaves coletadas:")
-        for i, c in enumerate(chaves, 1):
-            print(f"  {i:>3}. {_fmt(c)}")
+        print(_cor(f"  {len(chaves)} chave(s) coletada(s) com sucesso.", _VERDE))
     else:
-        print("Nenhuma chave coletada.")
+        print("  Nenhuma chave coletada.")

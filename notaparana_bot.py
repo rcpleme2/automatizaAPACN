@@ -112,30 +112,10 @@ def _fechar_popup_cookies(page: Page) -> None:
 
 
 def _fazer_login(page: Page, usuario: str, senha: str) -> None:
-    """Navega até o login e autentica o usuário."""
-    log.info("Acessando portal Nota Paraná...")
-    page.goto(URL_NOTA_PARANA, wait_until="domcontentloaded")
+    """Navega direto para a página de autenticação e realiza o login."""
+    log.info(f"Acessando página de autenticação: {URL_LOGIN_DIRETO}")
+    page.goto(URL_LOGIN_DIRETO, wait_until="domcontentloaded")
     _fechar_popup_cookies(page)
-
-    # Tenta clicar no botão "Acessar" da home (redireciona para Identidade SEFA)
-    na_pagina_login = False
-    try:
-        btn_acessar = page.locator(
-            "a, button"
-        ).filter(has_text=re.compile(r"^acessar$", re.IGNORECASE)).first
-        btn_acessar.wait_for(state="visible", timeout=TIMEOUT_CURTO)
-        btn_acessar.click()
-        page.wait_for_load_state("domcontentloaded")
-        _fechar_popup_cookies(page)
-        na_pagina_login = True
-    except PlaywrightTimeout:
-        log.warning("Botão 'Acessar' não encontrado na home; navegando diretamente para login.")
-
-    # Fallback: vai direto para a URL de login da Identidade SEFA
-    if not na_pagina_login or page.locator("#attribute").count() == 0:
-        log.info(f"Navegando para: {URL_LOGIN_DIRETO}")
-        page.goto(URL_LOGIN_DIRETO, wait_until="domcontentloaded")
-        _fechar_popup_cookies(page)
 
     log.info("Preenchendo credenciais...")
     # Campo usuário (CPF/CNPJ) – id="attribute" (Identidade SEFA-PR)
@@ -148,6 +128,10 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
     campo_senha = page.locator("#password")
     page.evaluate("document.querySelector('#password').value = ''")
     campo_senha.fill(senha)
+
+    # Aguarda 2 s após preencher para que validações da página se estabilizem
+    log.info("Aguardando antes de submeter...")
+    page.wait_for_timeout(2_000)
 
     page.get_by_role("button", name=re.compile(r"acessar", re.IGNORECASE)).click()
     page.wait_for_load_state("domcontentloaded")

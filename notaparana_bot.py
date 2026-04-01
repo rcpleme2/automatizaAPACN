@@ -37,8 +37,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constantes
 # ---------------------------------------------------------------------------
-URL_NOTA_PARANA  = "https://www.notaparana.pr.gov.br/"
-URL_LOGIN_DIRETO = "https://identidade.sefa.pr.gov.br/nidp/app/login"
+URL_LOGIN_DIRETO = "https://notaparana.pr.gov.br/"
 TIMEOUT_PADRAO   = 30_000   # ms
 TIMEOUT_CURTO    =  5_000   # ms – para checagem opcional de modais
 

@@ -1,0 +1,34 @@
+# Secrets - NUNCA versionar
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Playwright
+playwright-report/
+test-results/
+
+# Logs e resultados
+logs/
+*.log
+chaves_coletadas.json
+resultado_doacao.json
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

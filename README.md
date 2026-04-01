@@ -15,83 +15,43 @@ Sistema de coleta de notas fiscais do Paraná via leitor de QR code/código de b
 
 ---
 
-## Pré-requisitos
+## Instalação e uso (Windows)
 
-| Dependência | Instalação |
-|---|---|
-| Python 3.11+ | `python3 --version` |
-| Playwright Chromium | `playwright install chromium` |
-| Leitor de QR/barcode USB | Qualquer modelo que emule teclado (HID) |
+### Pré-requisitos
 
-> **Não é necessária webcam.** O leitor USB funciona como teclado: ao escanear, ele digita o código e tecla ENTER automaticamente.
+**1. Instalar o Python**
+Baixe em **https://www.python.org/downloads/** e execute o instalador.
+> Durante a instalação, marque obrigatoriamente a opção **"Add Python to PATH"**.
 
----
+**2. Baixar o projeto**
+Baixe o ZIP do repositório e extraia em uma pasta de sua preferência.
 
-## Instalação
-
-```bash
-# 1. Clone o repositório
-git clone <url-do-repo>
-cd automatizaAPACN
-
-# 2. Crie e ative um ambiente virtual (recomendado)
-python3 -m venv venv
-source venv/bin/activate   # Linux/macOS
-# venv\Scripts\activate    # Windows
-
-# 3. Instale as dependências Python
-pip install -r requirements.txt
-
-# 4. Instale o navegador Chromium para o Playwright
-playwright install chromium
-
-# 5. Configure o arquivo .env
-cp .env.example .env
-# Edite .env com seu CPF/CNPJ, senha e CNPJ da entidade
-```
-
-### Conteúdo do `.env`
+**3. Configurar o arquivo `.env`**
+Dentro da pasta extraída, copie o arquivo `.env.example`, renomeie a cópia para `.env` e preencha os dados:
 
 ```env
-NOTAPARANA_USER=00000000000          # CPF ou CNPJ (somente números)
+NOTAPARANA_USER=00000000000          # seu CPF ou CNPJ (somente números)
 NOTAPARANA_PASSWORD=suasenha
 NOTAPARANA_CNPJ_ENTIDADE=00000000000000   # CNPJ da entidade (14 dígitos)
 ```
 
 > **O arquivo `.env` nunca deve ser versionado.** Ele já está no `.gitignore`.
 
+**4. Executar**
+Dê dois cliques no arquivo **`iniciar.bat`**.
+
+- **Primeira execução:** o sistema instala automaticamente todas as dependências (pode levar alguns minutos). Aguarde a conclusão.
+- **Execuções seguintes:** abre o programa diretamente.
+
 ---
 
-## Uso
+## Como usar o programa
 
-### Execução completa (recomendado)
-
-```bash
-python main.py
-```
-
-### Opções disponíveis
-
-```
-python main.py [--headless]
-
-  --headless   Executa o navegador sem janela gráfica
-```
-
-### Como usar durante a coleta
-
-1. Execute `python main.py` no terminal.
-2. Aponte o leitor para o QR code ou código de barras de cada nota.
-3. O leitor lê e envia automaticamente — a nota aparece listada na tela.
-4. Para **encerrar**: leia um QR com o texto `FIM`, ou pressione **ENTER** com o campo vazio.
-5. Confirme a lista exibida digitando **S** + ENTER.
-6. Aguarde o envio automático. Ao final, um aviso mostra quantas notas foram doadas.
-
-### Somente coleta (teste sem doação)
-
-```bash
-python qr_collector.py
-```
+1. Execute `iniciar.bat`.
+2. Aponte o leitor USB para o QR code ou código de barras de cada nota — ele lê e registra automaticamente.
+3. Para **encerrar a coleta**: leia um código com o texto `FIM`, ou pressione **ENTER** com o campo vazio.
+4. Revise a lista exibida e confirme digitando **S** + ENTER.
+5. Aguarde o envio automático. Ao final, um aviso mostra quantas notas foram doadas.
 
 ---
 
@@ -105,6 +65,7 @@ Cada código escaneado passa pelas seguintes verificações antes de ser aceito:
 - Dígito verificador correto (Módulo 11, conforme manual SEFAZ)
 
 Leituras duplicadas ou inválidas são descartadas com aviso imediato na tela.
+A chave pode ser fornecida com espaços ou hífens entre grupos — o sistema normaliza automaticamente.
 
 ---
 
@@ -112,6 +73,7 @@ Leituras duplicadas ou inválidas são descartadas com aviso imediato na tela.
 
 ```
 automatizaAPACN/
+├── iniciar.bat          # Clique duplo para instalar e executar (Windows)
 ├── main.py              # Ponto de entrada – orquestra o fluxo completo
 ├── qr_collector.py      # Coleta via leitor HID + validação de chaves
 ├── notaparana_bot.py    # Automação Playwright do portal Nota Paraná

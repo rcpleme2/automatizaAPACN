@@ -3,19 +3,14 @@ notaparana_bot.py
 -----------------
 Automação Playwright para login e doação manual no portal Nota Paraná.
 
-Lê usuário e CNPJ da entidade do arquivo .env:
-    NOTAPARANA_USER          – CPF ou CNPJ do titular (somente números)
-    NOTAPARANA_CNPJ_ENTIDADE – CNPJ da entidade a receber as doações
-
-A senha é solicitada ao usuário em tempo de execução (não fica no .env).
+Todas as credenciais são recebidas como parâmetros em tempo de execução.
+Nenhum dado sensível é lido de arquivo neste módulo.
 """
 
-import os
 import sys
 import logging
 import re
 
-from dotenv import load_dotenv
 from playwright.sync_api import (
     sync_playwright,
     Browser,
@@ -23,8 +18,6 @@ from playwright.sync_api import (
     Playwright,
     TimeoutError as PlaywrightTimeout,
 )
-
-load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -48,16 +41,6 @@ TIMEOUT_CURTO    =  5_000   # ms
 # ---------------------------------------------------------------------------
 # Funções auxiliares
 # ---------------------------------------------------------------------------
-
-def _obter_env(nome: str) -> str:
-    valor = os.getenv(nome, "").strip()
-    if not valor:
-        sys.exit(
-            f"[ERRO] Variável de ambiente '{nome}' não encontrada ou vazia.\n"
-            "       Configure o arquivo .env a partir do modelo .env.example."
-        )
-    return valor
-
 
 def _so_digitos(texto: str) -> str:
     return re.sub(r'\D', '', texto)
@@ -243,31 +226,27 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
 # API pública – três funções para controle externo do ciclo de vida
 # ---------------------------------------------------------------------------
 
-def iniciar_sessao(senha: str, headless: bool = False) -> tuple[Playwright, Browser, Page, str]:
+def iniciar_sessao(usuario: str, senha: str, headless: bool = False) -> tuple[Playwright, Browser, Page]:
     """
     Abre o navegador, faz login e retorna os objetos de sessão.
 
+    Args:
+        usuario:  CPF ou CNPJ do titular (somente dígitos).
+        senha:    Senha de acesso.
+        headless: Se True, executa sem janela gráfica.
+
     Returns:
-        (pw, browser, page, cnpj_entidade)
+        (pw, browser, page)
     """
-    usuario       = _so_digitos(_obter_env("NOTAPARANA_USER"))
-    cnpj_entidade = _so_digitos(_obter_env("NOTAPARANA_CNPJ_ENTIDADE"))
-
-    if len(cnpj_entidade) != 14:
-        sys.exit(
-            f"[ERRO] NOTAPARANA_CNPJ_ENTIDADE deve ter 14 dígitos; "
-            f"encontrado: {len(cnpj_entidade)} dígito(s)."
-        )
-
     pw      = sync_playwright().start()
     browser = pw.chromium.launch(headless=headless)
     page    = browser.new_context().new_page()
     page.set_default_timeout(TIMEOUT_PADRAO)
 
-    _fazer_login(page, usuario, senha)
+    _fazer_login(page, _so_digitos(usuario), senha)
     _fechar_modal_contato(page)
 
-    return pw, browser, page, cnpj_entidade
+    return pw, browser, page
 
 
 def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str]) -> dict:

@@ -4,7 +4,8 @@ main.py
 Ponto de entrada da automação de doação no Nota Paraná.
 
 Fluxo:
-  1. Solicita a senha ao usuário (oculta na digitação).
+  1. Solicita usuário, CNPJ da entidade e senha (esta última não é salva).
+     Usuário e CNPJ são pré-preenchidos com os valores da última execução.
   2. Abre o navegador e faz login no portal.
   3. Loop:
        a. Coleta QR codes via leitor USB.
@@ -20,32 +21,109 @@ Uso:
 
 import argparse
 import getpass
+import json
+import re
 import sys
+from pathlib import Path
 
 from qr_collector import coletar_qr_codes, _fmt as fmt_chave, _cor, \
     _VERDE, _VERMELHO, _AMARELO, _AZUL, _NEGRITO, _RESET, _limpar_tela
 from notaparana_bot import iniciar_sessao, doar_lote, encerrar_sessao
 
+# Arquivo de configuração local (não versionado)
+_CONFIG_PATH = Path(__file__).parent / "config.json"
+
 
 # ---------------------------------------------------------------------------
-# Telas de apoio ao usuário
+# Persistência de configuração
 # ---------------------------------------------------------------------------
 
-def _tela_senha() -> str:
-    """Solicita a senha de forma segura (caracteres ocultos)."""
+def _carregar_config() -> dict:
+    """Lê config.json; retorna dict vazio se não existir."""
+    if _CONFIG_PATH.exists():
+        try:
+            return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _salvar_config(config: dict) -> None:
+    """Grava config.json com os dados não-sensíveis."""
+    _CONFIG_PATH.write_text(
+        json.dumps(config, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Prompts de entrada
+# ---------------------------------------------------------------------------
+
+def _input_com_padrao(label: str, padrao: str = "") -> str:
+    """Exibe prompt com valor padrão pré-preenchido. ENTER mantém o padrão."""
+    if padrao:
+        valor = input(f"   {label} [{padrao}]: ").strip()
+        return valor if valor else padrao
+    return input(f"   {label}: ").strip()
+
+
+def _so_digitos(texto: str) -> str:
+    return re.sub(r'\D', '', texto)
+
+
+def _tela_credenciais(config: dict) -> tuple[str, str, str]:
+    """
+    Solicita usuário, CNPJ da entidade e senha.
+    Retorna (usuario, cnpj_entidade, senha).
+    Usuário e CNPJ são pré-preenchidos com valores salvos (editáveis).
+    Senha nunca é pré-preenchida nem salva.
+    """
     _limpar_tela()
     print(_cor("=" * 62, _AZUL))
     print(_cor("   NOTA PARANÁ – DOAÇÃO AUTOMÁTICA", _NEGRITO))
     print(_cor("=" * 62, _AZUL))
     print()
-    print("   Digite sua senha de acesso ao Nota Paraná.")
-    print("   (Os caracteres não serão exibidos durante a digitação.)")
+    print("   Preencha os dados abaixo.")
+    print("   Campos com [ ] já possuem valor salvo — pressione ENTER para manter.")
     print()
-    return getpass.getpass("   Senha: ")
 
+    # Usuário
+    usuario = ""
+    while not usuario:
+        usuario = _so_digitos(
+            _input_com_padrao("Usuário (CPF/CNPJ)", config.get("usuario", ""))
+        )
+        if not usuario:
+            print("   Campo obrigatório.\n")
+
+    # CNPJ da entidade
+    cnpj_entidade = ""
+    while len(cnpj_entidade) != 14:
+        raw = _input_com_padrao(
+            "CNPJ da entidade (14 dígitos)", config.get("cnpj_entidade", "")
+        )
+        cnpj_entidade = _so_digitos(raw)
+        if len(cnpj_entidade) != 14:
+            print(f"   CNPJ deve ter 14 dígitos (informado: {len(cnpj_entidade)}).\n")
+
+    # Senha (oculta, nunca salva)
+    print()
+    print("   A senha não será exibida durante a digitação.")
+    senha = ""
+    while not senha:
+        senha = getpass.getpass("   Senha: ")
+        if not senha:
+            print("   Campo obrigatório.\n")
+
+    return usuario, cnpj_entidade, senha
+
+
+# ---------------------------------------------------------------------------
+# Telas de navegação
+# ---------------------------------------------------------------------------
 
 def _tela_confirmacao(chaves: list[str]) -> bool:
-    """Exibe a lista de chaves coletadas e pede confirmação simples."""
     _limpar_tela()
     print(_cor("=" * 62, _AZUL))
     print(_cor("   CONFIRMAÇÃO – NOTAS PARA DOAÇÃO", _NEGRITO))
@@ -55,10 +133,8 @@ def _tela_confirmacao(chaves: list[str]) -> bool:
         print(f"   {i:>3}.  {fmt_chave(c)}")
     print()
     print(_cor("-" * 62, _AZUL))
-    print("   Digite  S  e pressione ENTER para confirmar.")
-    print("   Digite  N  e pressione ENTER para cancelar.")
+    print("   S = confirmar  |  N = cancelar")
     print(_cor("=" * 62, _AZUL))
-
     while True:
         resp = input("\n   Sua escolha [S/N]: ").strip().upper()
         if resp in ("S", "SIM"):
@@ -78,7 +154,6 @@ def _tela_processando(total: int) -> None:
 
 
 def _tela_resultado(sucesso: int, erros: int, chaves_erro: list[str]) -> None:
-    """Exibe o aviso visual de resultado do lote."""
     _limpar_tela()
 
     if erros == 0:
@@ -115,13 +190,11 @@ def _tela_resultado(sucesso: int, erros: int, chaves_erro: list[str]) -> None:
 
 
 def _perguntar_mais_notas() -> bool:
-    """Pergunta se o operador deseja lançar mais um lote de notas."""
     print()
     print(_cor("-" * 62, _AZUL))
     print("   Deseja lançar mais notas?")
     print("   S = sim, continuar  |  N = não, encerrar")
     print(_cor("-" * 62, _AZUL))
-
     while True:
         resp = input("\n   Sua escolha [S/N]: ").strip().upper()
         if resp in ("S", "SIM"):
@@ -140,27 +213,29 @@ def main() -> None:
         description="Automação de doação de notas fiscais no Nota Paraná"
     )
     parser.add_argument(
-        "--headless",
-        action="store_true",
+        "--headless", action="store_true",
         help="Executa o navegador sem janela gráfica",
     )
     args = parser.parse_args()
 
-    # ── Solicita senha (oculta) ──────────────────────────────────────────────
-    senha = _tela_senha()
-    if not senha:
-        print("\n   Senha não informada. Encerrando.")
-        sys.exit(0)
+    # ── Lê configuração salva e solicita credenciais ─────────────────────────
+    config = _carregar_config()
+    usuario, cnpj_entidade, senha = _tela_credenciais(config)
+
+    # Salva usuário e CNPJ (nunca a senha)
+    config["usuario"]       = usuario
+    config["cnpj_entidade"] = cnpj_entidade
+    _salvar_config(config)
 
     # ── Abre navegador e faz login ────────────────────────────────────────────
     print("\n   Iniciando sessão no Nota Paraná...")
-    pw, browser, page, cnpj_entidade = iniciar_sessao(senha, headless=args.headless)
+    pw, browser, page = iniciar_sessao(usuario, senha, headless=args.headless)
 
     houve_erro_geral = False
 
     try:
         while True:
-            # ── Coleta de QR codes ─────────────────────────────────────────
+            # ── Coleta ────────────────────────────────────────────────────
             chaves = coletar_qr_codes()
 
             if not chaves:
@@ -170,18 +245,18 @@ def main() -> None:
                     break
                 continue
 
-            # ── Confirmação ────────────────────────────────────────────────
+            # ── Confirmação ───────────────────────────────────────────────
             if not _tela_confirmacao(chaves):
                 print("\n   Lote cancelado pelo operador.")
                 if not _perguntar_mais_notas():
                     break
                 continue
 
-            # ── Doação ────────────────────────────────────────────────────
+            # ── Doação ───────────────────────────────────────────────────
             _tela_processando(len(chaves))
             resultado = doar_lote(page, cnpj_entidade, chaves)
 
-            # ── Resultado ─────────────────────────────────────────────────
+            # ── Resultado ────────────────────────────────────────────────
             _tela_resultado(resultado["sucesso"], resultado["erro"],
                             resultado["chaves_com_erro"])
 
@@ -192,7 +267,7 @@ def main() -> None:
                 break
 
     finally:
-        # ── Logout e encerramento ──────────────────────────────────────────
+        # ── Logout e encerramento (sempre executado) ──────────────────────
         encerrar_sessao(pw, browser, page)
         print("\n   Sessão encerrada. Até logo!")
 

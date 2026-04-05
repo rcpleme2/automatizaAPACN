@@ -1,5 +1,6 @@
-# Secrets - NUNCA versionar
+# Secrets e dados locais - NUNCA versionar
 .env
+config.json
 
 # Python
 __pycache__/

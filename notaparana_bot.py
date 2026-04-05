@@ -130,7 +130,7 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
 
     # Aguarda 2 s após preencher para que validações da página se estabilizem
     log.info("Aguardando antes de submeter...")
-    page.wait_for_timeout(2_000)
+    page.wait_for_timeout(3_000)
 
     page.get_by_role("button", name=re.compile(r"acessar", re.IGNORECASE)).click()
     page.wait_for_load_state("domcontentloaded")

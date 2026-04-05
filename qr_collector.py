@@ -4,8 +4,9 @@ qr_collector.py
 Coleta de chaves de acesso NF-e/NFC-e a partir de um leitor de código
 de barras / QR code USB (modo HID – emula teclado).
 
-O leitor envia o conteúdo escaneado seguido de ENTER automaticamente.
-Basta apontar para os códigos; nenhuma interação adicional é necessária.
+O leitor não precisa estar configurado para enviar ENTER: o script lê
+caractere a caractere e encerra a leitura automaticamente após um breve
+período de inatividade (padrão: 150 ms sem novo caractere).
 
 Para encerrar a coleta: pressione ENTER com o campo vazio, ou
                         leia um QR/código com o texto "FIM".
@@ -14,6 +15,7 @@ Para encerrar a coleta: pressione ENTER com o campo vazio, ou
 import re
 import os
 import sys
+import time
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -89,6 +91,82 @@ def validar_chave(chave: str) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# Leitura de input sem depender de ENTER do leitor
+# ---------------------------------------------------------------------------
+
+if os.name == "nt":
+    import msvcrt
+
+    def _ler_scan(prompt: str = "   > ", timeout: float = 0.15) -> str:
+        """
+        Lê caracteres do leitor um a um (Windows/msvcrt).
+        Encerra quando recebe CR/LF ou após `timeout` segundos sem novo caractere.
+        Não exige que o leitor envie ENTER.
+        """
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        buffer: list[str] = []
+        ultimo: float | None = None
+
+        while True:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    break
+                if ch == "\x08" and buffer:   # backspace
+                    buffer.pop()
+                else:
+                    buffer.append(ch)
+                ultimo = time.time()
+            else:
+                if buffer and ultimo is not None:
+                    if time.time() - ultimo >= timeout:
+                        break
+                time.sleep(0.005)
+
+        print()
+        return "".join(buffer)
+
+else:
+    # Linux / macOS: usa termios para leitura raw caractere a caractere
+    import tty
+    import termios
+    import select
+
+    def _ler_scan(prompt: str = "   > ", timeout: float = 0.15) -> str:
+        """
+        Lê caracteres do leitor um a um (Linux/macOS via termios).
+        Encerra quando recebe CR/LF ou após `timeout` segundos sem novo caractere.
+        """
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        buffer: list[str] = []
+        fd = sys.stdin.fileno()
+        config_orig = termios.tcgetattr(fd)
+
+        try:
+            tty.setraw(fd)
+            while True:
+                pronto, _, _ = select.select([sys.stdin], [], [], timeout)
+                if pronto:
+                    ch = sys.stdin.read(1)
+                    if ch in ("\r", "\n"):
+                        break
+                    if ch == "\x7f" and buffer:   # backspace
+                        buffer.pop()
+                    else:
+                        buffer.append(ch)
+                else:
+                    if buffer:   # timeout sem novo char → leitura completa
+                        break
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, config_orig)
+
+        print()
+        return "".join(buffer)
+
+
+# ---------------------------------------------------------------------------
 # Helpers de exibição
 # ---------------------------------------------------------------------------
 
@@ -134,7 +212,7 @@ def coletar_qr_codes() -> list[str]:
 
     while True:
         try:
-            entrada = input("   > ").strip()
+            entrada = _ler_scan().strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break

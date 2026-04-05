@@ -92,7 +92,7 @@ def _tela_credenciais(config: dict) -> tuple[str, str, str]:
     usuario = ""
     while not usuario:
         usuario = _so_digitos(
-            _input_com_padrao("Usuário (CPF/CNPJ)", config.get("usuario", ""))
+            _input_com_padrao("Usuário (CPF)", config.get("usuario", ""))
         )
         if not usuario:
             print("   Campo obrigatório.\n")

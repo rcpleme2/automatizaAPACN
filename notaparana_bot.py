@@ -92,7 +92,7 @@ def _fechar_popup_cookies(page: Page) -> None:
 def _tentar_login(page: Page, usuario: str, senha: str) -> None:
     """Preenche e submete o formulário de login uma única vez."""
     log.info(f"Acessando página de autenticação: {URL_LOGIN_DIRETO}")
-    page.goto(URL_LOGIN_DIRETO, wait_until="domcontentloaded")
+    page.goto(URL_LOGIN_DIRETO, wait_until="load")
     _fechar_popup_cookies(page)
 
     log.info("Preenchendo credenciais...")
@@ -105,11 +105,17 @@ def _tentar_login(page: Page, usuario: str, senha: str) -> None:
     page.evaluate("document.querySelector('#password').value = ''")
     campo_senha.fill(senha)
 
-    log.info("Aguardando antes de submeter...")
-    page.wait_for_timeout(3_000)
+    # Aguarda o botão ficar ativo e a página estabilizar antes de submeter
+    btn = page.get_by_role("button", name=re.compile(r"acessar", re.IGNORECASE))
+    btn.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
+    try:
+        page.wait_for_load_state("networkidle", timeout=TIMEOUT_CURTO)
+    except PlaywrightTimeout:
+        pass  # prossegue mesmo se a página não estabilizar completamente
 
-    page.get_by_role("button", name=re.compile(r"acessar", re.IGNORECASE)).click()
-    page.wait_for_load_state("domcontentloaded")
+    log.info("Submetendo login...")
+    btn.click()
+    page.wait_for_load_state("load")
 
 
 def _fazer_login(page: Page, usuario: str, senha: str) -> None:
@@ -170,16 +176,24 @@ def _fechar_modal_contato(page: Page) -> None:
 def _navegar_para_doacoes(page: Page) -> None:
     """Clica em 'MINHAS DOAÇÕES' e depois em 'Doação manual'."""
     log.info("Navegando para MINHAS DOAÇÕES...")
-    page.get_by_role(
+    link_doacoes = page.get_by_role(
         "link", name=re.compile(r"minhas doa", re.IGNORECASE)
-    ).click()
-    page.wait_for_load_state("domcontentloaded")
+    )
+    link_doacoes.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
+    link_doacoes.click()
 
+    # Aguarda o link de Doação manual aparecer (indica que a aba carregou)
     log.info("Selecionando Doação manual...")
-    page.get_by_role(
+    link_manual = page.get_by_role(
         "link", name=re.compile(r"doa.{0,5}o manual", re.IGNORECASE)
-    ).click()
-    page.wait_for_load_state("domcontentloaded")
+    )
+    link_manual.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
+    link_manual.click()
+
+    # Aguarda o campo CNPJ aparecer (indica que o formulário está pronto)
+    page.locator(
+        "input[placeholder*='CNPJ'], input[id*='cnpj'], input[name*='cnpj']"
+    ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
 
 
 def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: int) -> bool:
@@ -207,9 +221,10 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
             "button", name=re.compile(r"doar documento", re.IGNORECASE)
         ).click()
 
-        # Aguarda carregamento completo antes de prosseguir para a próxima nota
-        page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_PADRAO)
-        page.wait_for_load_state("networkidle", timeout=TIMEOUT_PADRAO)
+        # Aguarda o campo CNPJ ficar visível novamente (formulário pronto para próxima nota)
+        page.locator(
+            "input[placeholder*='CNPJ'], input[id*='cnpj'], input[name*='cnpj']"
+        ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
 
         log.info(f"  ✓ Chave {numero}/{total} doada.")
         return True

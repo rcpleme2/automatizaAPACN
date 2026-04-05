@@ -128,7 +128,7 @@ def _tentar_login(page: Page, usuario: str, senha: str) -> None:
     campo_senha.fill(senha)
 
     log.info("Aguardando antes de submeter...")
-    page.wait_for_timeout(2_000)
+    page.wait_for_timeout(3_000)
 
     page.get_by_role("button", name=re.compile(r"acessar", re.IGNORECASE)).click()
     page.wait_for_load_state("domcontentloaded")

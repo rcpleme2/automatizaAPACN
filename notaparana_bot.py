@@ -3,22 +3,24 @@ notaparana_bot.py
 -----------------
 Automação Playwright para login e doação manual no portal Nota Paraná.
 
-Lê credenciais e CNPJ da entidade exclusivamente do arquivo .env:
+Lê usuário e CNPJ da entidade do arquivo .env:
     NOTAPARANA_USER          – CPF ou CNPJ do titular (somente números)
-    NOTAPARANA_PASSWORD      – Senha
     NOTAPARANA_CNPJ_ENTIDADE – CNPJ da entidade a receber as doações
+
+A senha é solicitada ao usuário em tempo de execução (não fica no .env).
 """
 
 import os
 import sys
 import logging
 import re
-from typing import Optional
 
 from dotenv import load_dotenv
 from playwright.sync_api import (
     sync_playwright,
+    Browser,
     Page,
+    Playwright,
     TimeoutError as PlaywrightTimeout,
 )
 
@@ -40,11 +42,11 @@ log = logging.getLogger(__name__)
 URL_LOGIN_DIRETO = "https://notaparana.pr.gov.br/"
 URL_SAIR         = "https://notaparana.pr.gov.br/nfprweb/publico/sair"
 TIMEOUT_PADRAO   = 30_000   # ms
-TIMEOUT_CURTO    =  5_000   # ms – para checagem opcional de modais
+TIMEOUT_CURTO    =  5_000   # ms
 
 
 # ---------------------------------------------------------------------------
-# Funções auxiliares de ambiente
+# Funções auxiliares
 # ---------------------------------------------------------------------------
 
 def _obter_env(nome: str) -> str:
@@ -62,26 +64,20 @@ def _so_digitos(texto: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Etapas da automação
+# Etapas internas da automação
 # ---------------------------------------------------------------------------
 
 def _fechar_popup_cookies(page: Page) -> None:
-    """
-    Tenta fechar banners de consentimento de cookies.
-    Silencioso: não falha se nenhum popup estiver presente.
-    """
+    """Tenta fechar banners de consentimento de cookies. Silencioso."""
     seletores_botao = [
-        # Seletores específicos de frameworks de cookie comuns
         "#acceptCookies", "#accept-cookies", "#btnAceitarCookies",
         ".cookie-accept", ".btn-cookie-accept",
-        # Texto do botão – Playwright resolve case-insensitive via regex
     ]
     textos_botao = re.compile(
         r"^(aceitar( todos)?|concordo|ok|entendi|permitir( todos)?)$",
         re.IGNORECASE,
     )
 
-    # 1. Tenta por seletores CSS conhecidos
     for seletor in seletores_botao:
         try:
             btn = page.locator(seletor).first
@@ -93,7 +89,6 @@ def _fechar_popup_cookies(page: Page) -> None:
         except PlaywrightTimeout:
             continue
 
-    # 2. Tenta por texto do botão dentro de containers comuns de cookie
     try:
         btn = page.locator(
             "div[class*='cookie'] button, div[id*='cookie'] button, "
@@ -135,12 +130,7 @@ def _tentar_login(page: Page, usuario: str, senha: str) -> None:
 
 
 def _fazer_login(page: Page, usuario: str, senha: str) -> None:
-    """
-    Realiza o login com tratamento de sessão duplicada.
-
-    Se após o login aparecer a mensagem de múltiplas sessões ativas,
-    encerra a sessão anterior via URL de saída e tenta o login novamente.
-    """
+    """Login com tratamento de sessão duplicada."""
     _tentar_login(page, usuario, senha)
 
     # Verifica credenciais inválidas
@@ -149,8 +139,8 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
             state="visible", timeout=TIMEOUT_CURTO
         )
         sys.exit(
-            "[ERRO] Login falhou: credenciais inválidas (Usuário/Senha inválido.).\n"
-            "       Corrija NOTAPARANA_USER e NOTAPARANA_PASSWORD no arquivo .env."
+            "[ERRO] Login falhou: usuário ou senha incorretos.\n"
+            "       Verifique NOTAPARANA_USER no .env e a senha digitada."
         )
     except PlaywrightTimeout:
         pass
@@ -167,20 +157,18 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
 
         _tentar_login(page, usuario, senha)
 
-        # Segunda verificação de credenciais inválidas após relogin
         try:
             page.locator("text=Usuário/Senha inválido.").first.wait_for(
                 state="visible", timeout=TIMEOUT_CURTO
             )
             sys.exit(
-                "[ERRO] Login falhou após relogin: credenciais inválidas.\n"
-                "       Corrija NOTAPARANA_USER e NOTAPARANA_PASSWORD no arquivo .env."
+                "[ERRO] Login falhou após relogin: usuário ou senha incorretos."
             )
         except PlaywrightTimeout:
             pass
 
     except PlaywrightTimeout:
-        pass  # mensagem de sessão duplicada não apareceu – ok
+        pass
 
     log.info("Login realizado com sucesso.")
 
@@ -212,11 +200,7 @@ def _navegar_para_doacoes(page: Page) -> None:
 
 
 def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: int) -> bool:
-    """
-    Preenche e submete o formulário de doação manual para uma única chave.
-
-    Retorna True se bem-sucedido, False se houver erro não-fatal.
-    """
+    """Preenche e submete o formulário de doação para uma única chave."""
     log.info(f"Doando chave {numero}/{total}: {chave[:10]}...")
 
     try:
@@ -240,7 +224,7 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
             "button", name=re.compile(r"doar documento", re.IGNORECASE)
         ).click()
 
-        # Aguarda carregamento completo da página antes de prosseguir
+        # Aguarda carregamento completo antes de prosseguir para a próxima nota
         page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_PADRAO)
         page.wait_for_load_state("networkidle", timeout=TIMEOUT_PADRAO)
 
@@ -256,27 +240,18 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
 
 
 # ---------------------------------------------------------------------------
-# Função pública principal
+# API pública – três funções para controle externo do ciclo de vida
 # ---------------------------------------------------------------------------
 
-def executar_doacoes(chaves: list[str], headless: bool = False) -> dict:
+def iniciar_sessao(senha: str, headless: bool = False) -> tuple[Playwright, Browser, Page, str]:
     """
-    Realiza o login no Nota Paraná e doa todas as chaves da lista.
-
-    Args:
-        chaves:   Lista de chaves de acesso de 44 dígitos.
-        headless: Se True, executa o navegador sem interface gráfica.
+    Abre o navegador, faz login e retorna os objetos de sessão.
 
     Returns:
-        Dicionário com totais: {"sucesso": int, "erro": int, "chaves_com_erro": list}
+        (pw, browser, page, cnpj_entidade)
     """
-    if not chaves:
-        log.warning("Nenhuma chave para doar.")
-        return {"sucesso": 0, "erro": 0, "chaves_com_erro": []}
-
-    usuario          = _so_digitos(_obter_env("NOTAPARANA_USER"))
-    senha            = _obter_env("NOTAPARANA_PASSWORD")
-    cnpj_entidade    = _so_digitos(_obter_env("NOTAPARANA_CNPJ_ENTIDADE"))
+    usuario       = _so_digitos(_obter_env("NOTAPARANA_USER"))
+    cnpj_entidade = _so_digitos(_obter_env("NOTAPARANA_CNPJ_ENTIDADE"))
 
     if len(cnpj_entidade) != 14:
         sys.exit(
@@ -284,28 +259,49 @@ def executar_doacoes(chaves: list[str], headless: bool = False) -> dict:
             f"encontrado: {len(cnpj_entidade)} dígito(s)."
         )
 
+    pw      = sync_playwright().start()
+    browser = pw.chromium.launch(headless=headless)
+    page    = browser.new_context().new_page()
+    page.set_default_timeout(TIMEOUT_PADRAO)
+
+    _fazer_login(page, usuario, senha)
+    _fechar_modal_contato(page)
+
+    return pw, browser, page, cnpj_entidade
+
+
+def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str]) -> dict:
+    """
+    Navega para a doação manual e processa todas as chaves do lote.
+
+    Returns:
+        {"sucesso": int, "erro": int, "chaves_com_erro": list}
+    """
     resultado = {"sucesso": 0, "erro": 0, "chaves_com_erro": []}
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
-        context = browser.new_context()
-        page    = context.new_page()
+    if not chaves:
+        return resultado
 
-        page.set_default_timeout(TIMEOUT_PADRAO)
+    _navegar_para_doacoes(page)
 
-        _fazer_login(page, usuario, senha)
-        _fechar_modal_contato(page)
-        _navegar_para_doacoes(page)
-
-        total = len(chaves)
-        for idx, chave in enumerate(chaves, start=1):
-            sucesso = _doar_chave(page, cnpj_entidade, chave, idx, total)
-            if sucesso:
-                resultado["sucesso"] += 1
-            else:
-                resultado["erro"] += 1
-                resultado["chaves_com_erro"].append(chave)
-
-        browser.close()
+    for idx, chave in enumerate(chaves, start=1):
+        if _doar_chave(page, cnpj_entidade, chave, idx, len(chaves)):
+            resultado["sucesso"] += 1
+        else:
+            resultado["erro"] += 1
+            resultado["chaves_com_erro"].append(chave)
 
     return resultado
+
+
+def encerrar_sessao(pw: Playwright, browser: Browser, page: Page) -> None:
+    """Faz logout no site e encerra o navegador."""
+    log.info("Encerrando sessão no Nota Paraná...")
+    try:
+        page.goto(URL_SAIR, wait_until="load")
+        log.info("Logout realizado.")
+    except Exception as exc:
+        log.warning(f"Não foi possível acessar a URL de saída: {exc}")
+    finally:
+        browser.close()
+        pw.stop()

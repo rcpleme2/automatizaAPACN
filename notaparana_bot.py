@@ -240,7 +240,8 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
             "button", name=re.compile(r"doar documento", re.IGNORECASE)
         ).click()
 
-        # Aguarda algum feedback (modal de sucesso ou redirecionamento)
+        # Aguarda carregamento completo da página antes de prosseguir
+        page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_PADRAO)
         page.wait_for_load_state("networkidle", timeout=TIMEOUT_PADRAO)
 
         log.info(f"  ✓ Chave {numero}/{total} doada.")

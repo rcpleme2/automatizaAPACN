@@ -34,9 +34,10 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 URL_LOGIN_DIRETO = "https://notaparana.pr.gov.br/"
 URL_SAIR         = "https://notaparana.pr.gov.br/nfprweb/publico/sair"
-TIMEOUT_PADRAO   = 30_000   # ms
-TIMEOUT_CURTO    =  5_000   # ms
-TIMEOUT_COOKIE   =    500   # ms – falha rápida na checagem de popup de cookies
+TIMEOUT_PADRAO      = 30_000   # ms
+TIMEOUT_CURTO       =  5_000   # ms
+TIMEOUT_COOKIE      =    500   # ms – falha rápida na checagem de popup de cookies
+TIMEOUT_LOGIN_ERRO  =  1_500   # ms – tempo máximo para mensagens de erro aparecerem após o login
 
 MSG_SUCESSO_DOACAO = "Documento fiscal doado com sucesso!"
 
@@ -153,7 +154,7 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
     # Verifica credenciais inválidas
     try:
         page.locator("text=Usuário/Senha inválido.").first.wait_for(
-            state="visible", timeout=TIMEOUT_CURTO
+            state="visible", timeout=TIMEOUT_LOGIN_ERRO
         )
         sys.exit(
             "[ERRO] Login falhou: usuário ou senha incorretos.\n"
@@ -166,7 +167,7 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
     try:
         page.locator(
             "text=Ops! O usuário autenticado possui mais de uma sessão ativa."
-        ).first.wait_for(state="visible", timeout=TIMEOUT_CURTO)
+        ).first.wait_for(state="visible", timeout=TIMEOUT_LOGIN_ERRO)
 
         log.warning("Sessão duplicada detectada. Encerrando sessão anterior...")
         page.goto(URL_SAIR, wait_until="domcontentloaded")
@@ -176,7 +177,7 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
 
         try:
             page.locator("text=Usuário/Senha inválido.").first.wait_for(
-                state="visible", timeout=TIMEOUT_CURTO
+                state="visible", timeout=TIMEOUT_LOGIN_ERRO
             )
             sys.exit("[ERRO] Login falhou após relogin: usuário ou senha incorretos.")
         except PlaywrightTimeout:
@@ -240,15 +241,14 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
     log.info(f"Doando chave {numero}/{total}: {chave[:10]}...")
 
     try:
-        # ── 1. Preenche o CNPJ e dispara a verificação via botão de busca ──
+        # ── 1. Preenche o CNPJ e aguarda a verificação automática (blur/change) ─
         campo_cnpj = page.locator(_SEL_CNPJ).first
         campo_cnpj.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
         campo_cnpj.fill("")
-        campo_cnpj.fill(cnpj_entidade)
-
         try:
             with page.expect_response(_is_xhr, timeout=TIMEOUT_PADRAO) as cnpj_resp_info:
-                page.locator("#busca-entidade").click()
+                campo_cnpj.fill(cnpj_entidade)
+                campo_cnpj.press("Tab")  # dispara blur/change → verificação automática
             cnpj_resp = cnpj_resp_info.value
             if cnpj_resp.status == 400:
                 raise CNPJInvalidoError(

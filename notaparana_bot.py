@@ -221,10 +221,17 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
             "button", name=re.compile(r"doar documento", re.IGNORECASE)
         ).click()
 
-        # Aguarda o campo CNPJ ficar visível novamente (formulário pronto para próxima nota)
-        page.locator(
+        # Verificação em duas etapas: aguarda estabilização da página,
+        # depois confirma que o formulário está pronto para a próxima nota
+        page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_PADRAO)
+        try:
+            page.wait_for_load_state("networkidle", timeout=TIMEOUT_CURTO)
+        except PlaywrightTimeout:
+            pass  # prossegue mesmo se houver requisições residuais
+        campo_cnpj_prox = page.locator(
             "input[placeholder*='CNPJ'], input[id*='cnpj'], input[name*='cnpj']"
-        ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
+        ).first
+        campo_cnpj_prox.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
 
         log.info(f"  ✓ Chave {numero}/{total} doada.")
         return True

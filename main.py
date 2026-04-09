@@ -227,10 +227,8 @@ def main() -> None:
     config["cnpj_entidade"] = cnpj_entidade
     _salvar_config(config)
 
-    # ── Abre navegador e faz login ────────────────────────────────────────────
-    print("\n   Iniciando sessão no Nota Paraná...")
-    pw, browser, page = iniciar_sessao(usuario, senha, headless=args.headless)
-
+    # Navegador é aberto apenas no primeiro lançamento
+    pw = browser = page = None
     houve_erro_geral = False
 
     try:
@@ -241,16 +239,21 @@ def main() -> None:
             if not chaves:
                 _limpar_tela()
                 print(_cor("   Nenhuma nota registrada.", _AMARELO))
-                if not _perguntar_mais_notas():
+                if pw is None or not _perguntar_mais_notas():
                     break
                 continue
 
             # ── Confirmação ───────────────────────────────────────────────
             if not _tela_confirmacao(chaves):
                 print("\n   Lote cancelado pelo operador.")
-                if not _perguntar_mais_notas():
+                if pw is None or not _perguntar_mais_notas():
                     break
                 continue
+
+            # ── Abre navegador apenas no primeiro lançamento ──────────────
+            if pw is None:
+                print("\n   Iniciando sessão no Nota Paraná...")
+                pw, browser, page = iniciar_sessao(usuario, senha, headless=args.headless)
 
             # ── Doação ───────────────────────────────────────────────────
             _tela_processando(len(chaves))
@@ -267,9 +270,12 @@ def main() -> None:
                 break
 
     finally:
-        # ── Logout e encerramento (sempre executado) ──────────────────────
-        encerrar_sessao(pw, browser, page)
-        print("\n   Sessão encerrada. Até logo!")
+        # ── Logout e encerramento (só se o navegador foi aberto) ─────────
+        if pw is not None:
+            encerrar_sessao(pw, browser, page)
+            print("\n   Sessão encerrada. Até logo!")
+        else:
+            print("\n   Nenhuma sessão iniciada. Até logo!")
 
     sys.exit(1 if houve_erro_geral else 0)
 

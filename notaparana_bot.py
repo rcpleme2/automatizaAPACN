@@ -264,13 +264,11 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
         campo_chave.fill("")
         campo_chave.fill(chave)
 
-        # ── 3. Submete a doação e verifica a resposta HTTP ─────────────────
+        # ── 3. Clica em "DOAR DOCUMENTOS" e verifica a resposta HTTP ─────────
         doacao_confirmada = False
         try:
             with page.expect_response(_is_xhr, timeout=TIMEOUT_PADRAO) as doar_resp_info:
-                page.get_by_role(
-                    "button", name=re.compile(r"doar documento", re.IGNORECASE)
-                ).click()
+                page.locator("#btnDoarDocumento").click()
             doar_resp = doar_resp_info.value
             if doar_resp.status == 200:
                 try:

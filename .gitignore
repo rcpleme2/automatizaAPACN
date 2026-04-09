@@ -18,6 +18,7 @@ venv/
 .venv/
 env/
 .instalado
+.playwright_instalado
 
 # Playwright
 playwright-report/

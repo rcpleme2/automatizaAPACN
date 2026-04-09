@@ -250,6 +250,7 @@ def main() -> None:
     # Navegador é aberto apenas no primeiro lançamento
     pw = browser = page = None
     houve_erro_geral = False
+    cnpj_verificado = False   # torna-se True após a 1ª verificação bem-sucedida
 
     try:
         while True:
@@ -279,14 +280,17 @@ def main() -> None:
             _tela_processando(len(chaves))
             chaves_lote = list(chaves)
             while True:
-                resultado = doar_lote(page, cnpj_entidade, chaves_lote)
+                resultado = doar_lote(page, cnpj_entidade, chaves_lote,
+                                      verificar_cnpj=not cnpj_verificado)
                 if resultado.get("cnpj_invalido"):
                     cnpj_entidade = _pedir_cnpj_valido(cnpj_entidade)
                     config["cnpj_entidade"] = cnpj_entidade
                     _salvar_config(config)
                     chaves_lote = resultado["chaves_com_erro"]
+                    # cnpj_verificado permanece False → novo CNPJ será verificado
                     _tela_processando(len(chaves_lote))
                     continue
+                cnpj_verificado = True  # CNPJ ok; lotes seguintes pulam a verificação
                 break
 
             # ── Resultado ────────────────────────────────────────────────

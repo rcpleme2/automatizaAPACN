@@ -229,11 +229,13 @@ def _navegar_para_doacoes(page: Page) -> None:
     page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
 
 
-def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: int) -> bool:
+def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
+                numero: int, total: int, verificar_cnpj: bool = True) -> bool:
     """Preenche e submete o formulário de doação para uma única chave.
 
-    Verifica a resposta HTTP da consulta de CNPJ (200 = ok, 400 = inválido)
-    e da doação (200 + _mensagem de sucesso).
+    verificar_cnpj=True  → preenche o CNPJ, aciona a verificação automática do
+                           portal (blur/change) e confere a resposta HTTP.
+    verificar_cnpj=False → o CNPJ já está preenchido e verificado; pula o passo 1.
 
     Raises:
         CNPJInvalidoError: se a verificação do CNPJ retornar HTTP 400.
@@ -241,22 +243,23 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
     log.info(f"Doando chave {numero}/{total}: {chave[:10]}...")
 
     try:
-        # ── 1. Preenche o CNPJ e aguarda a verificação automática (blur/change) ─
-        campo_cnpj = page.locator(_SEL_CNPJ).first
-        campo_cnpj.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
-        campo_cnpj.fill("")
-        try:
-            with page.expect_response(_is_xhr, timeout=TIMEOUT_PADRAO) as cnpj_resp_info:
-                campo_cnpj.fill(cnpj_entidade)
-                campo_cnpj.press("Tab")  # dispara blur/change → verificação automática
-            cnpj_resp = cnpj_resp_info.value
-            if cnpj_resp.status == 400:
-                raise CNPJInvalidoError(
-                    f"CNPJ {cnpj_entidade} inválido — portal retornou HTTP 400."
-                )
-            log.info(f"  CNPJ verificado (HTTP {cnpj_resp.status}).")
-        except PlaywrightTimeout:
-            log.warning("  Verificação de CNPJ não interceptada (timeout). Prosseguindo.")
+        # ── 1. Preenche o CNPJ e aguarda a verificação automática ─────────
+        if verificar_cnpj:
+            campo_cnpj = page.locator(_SEL_CNPJ).first
+            campo_cnpj.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
+            campo_cnpj.fill("")
+            try:
+                with page.expect_response(_is_xhr, timeout=TIMEOUT_PADRAO) as cnpj_resp_info:
+                    campo_cnpj.fill(cnpj_entidade)
+                    campo_cnpj.press("Tab")  # dispara blur/change → verificação automática
+                cnpj_resp = cnpj_resp_info.value
+                if cnpj_resp.status == 400:
+                    raise CNPJInvalidoError(
+                        f"CNPJ {cnpj_entidade} inválido — portal retornou HTTP 400."
+                    )
+                log.info(f"  CNPJ verificado (HTTP {cnpj_resp.status}).")
+            except PlaywrightTimeout:
+                log.warning("  Verificação de CNPJ não interceptada (timeout). Prosseguindo.")
 
         # ── 2. Preenche a chave de acesso ──────────────────────────────────
         campo_chave = page.locator(_SEL_CHAVE).first
@@ -332,10 +335,14 @@ def iniciar_sessao(usuario: str, senha: str, headless: bool = False) -> tuple[Pl
     return pw, browser, page
 
 
-def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str]) -> dict:
+def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
+              verificar_cnpj: bool = True) -> dict:
     """
     Processa um lote de chaves de acesso.
     Navega para o formulário apenas se ainda não estiver nele.
+
+    verificar_cnpj=True  → verifica o CNPJ na primeira nota do lote.
+    verificar_cnpj=False → CNPJ já foi verificado em lote anterior; pula a verificação.
 
     Returns:
         {
@@ -356,8 +363,11 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str]) -> dict:
         _navegar_para_doacoes(page)
 
     for idx, chave in enumerate(chaves, start=1):
+        # Verifica o CNPJ apenas na primeira nota (e somente se solicitado)
+        checar = verificar_cnpj and idx == 1
         try:
-            if _doar_chave(page, cnpj_entidade, chave, idx, len(chaves)):
+            if _doar_chave(page, cnpj_entidade, chave, idx, len(chaves),
+                           verificar_cnpj=checar):
                 resultado["sucesso"] += 1
             else:
                 resultado["erro"] += 1

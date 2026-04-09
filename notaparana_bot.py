@@ -36,6 +36,17 @@ URL_LOGIN_DIRETO = "https://notaparana.pr.gov.br/"
 URL_SAIR         = "https://notaparana.pr.gov.br/nfprweb/publico/sair"
 TIMEOUT_PADRAO   = 30_000   # ms
 TIMEOUT_CURTO    =  5_000   # ms
+TIMEOUT_COOKIE   =    500   # ms – falha rápida na checagem de popup de cookies
+
+
+# ---------------------------------------------------------------------------
+# Seletor do campo CNPJ (reutilizado em múltiplos pontos)
+# ---------------------------------------------------------------------------
+_SEL_CNPJ  = "input[placeholder*='CNPJ'], input[id*='cnpj'], input[name*='cnpj']"
+_SEL_CHAVE = (
+    "input[placeholder*='Chave'], input[placeholder*='chave'], "
+    "input[id*='chave'], input[name*='chave'], input[maxlength='44']"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -51,36 +62,39 @@ def _so_digitos(texto: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _fechar_popup_cookies(page: Page) -> None:
-    """Tenta fechar banners de consentimento de cookies. Silencioso."""
-    seletores_botao = [
-        "#acceptCookies", "#accept-cookies", "#btnAceitarCookies",
-        ".cookie-accept", ".btn-cookie-accept",
-    ]
+    """
+    Tenta fechar banner de cookies em até ~1 s no total.
+    Combina todos os seletores em uma única consulta para falhar rápido.
+    """
     textos_botao = re.compile(
         r"^(aceitar( todos)?|concordo|ok|entendi|permitir( todos)?)$",
         re.IGNORECASE,
     )
 
-    for seletor in seletores_botao:
-        try:
-            btn = page.locator(seletor).first
-            btn.wait_for(state="visible", timeout=1_500)
-            btn.click()
-            log.info(f"Popup de cookies fechado via seletor: {seletor}")
-            page.wait_for_load_state("domcontentloaded")
-            return
-        except PlaywrightTimeout:
-            continue
+    # Tentativa 1: seletores CSS conhecidos combinados em um único locator
+    try:
+        btn = page.locator(
+            "#acceptCookies, #accept-cookies, #btnAceitarCookies, "
+            ".cookie-accept, .btn-cookie-accept"
+        ).first
+        btn.wait_for(state="visible", timeout=TIMEOUT_COOKIE)
+        btn.click()
+        log.info("Popup de cookies fechado (seletor CSS).")
+        page.wait_for_load_state("domcontentloaded")
+        return
+    except PlaywrightTimeout:
+        pass
 
+    # Tentativa 2: botão por texto dentro de containers LGPD/cookie
     try:
         btn = page.locator(
             "div[class*='cookie'] button, div[id*='cookie'] button, "
             "#cookieBar button, .lgpd button, [class*='lgpd'] button, "
             "[class*='consent'] button"
         ).filter(has_text=textos_botao).first
-        btn.wait_for(state="visible", timeout=1_500)
+        btn.wait_for(state="visible", timeout=TIMEOUT_COOKIE)
         btn.click()
-        log.info("Popup de cookies fechado via texto do botão.")
+        log.info("Popup de cookies fechado (texto do botão).")
         page.wait_for_load_state("domcontentloaded")
         return
     except PlaywrightTimeout:
@@ -92,7 +106,8 @@ def _fechar_popup_cookies(page: Page) -> None:
 def _tentar_login(page: Page, usuario: str, senha: str) -> None:
     """Preenche e submete o formulário de login uma única vez."""
     log.info(f"Acessando página de autenticação: {URL_LOGIN_DIRETO}")
-    page.goto(URL_LOGIN_DIRETO, wait_until="load")
+    # domcontentloaded é suficiente para o formulário aparecer e é mais rápido que "load"
+    page.goto(URL_LOGIN_DIRETO, wait_until="domcontentloaded")
     _fechar_popup_cookies(page)
 
     log.info("Preenchendo credenciais...")
@@ -105,21 +120,18 @@ def _tentar_login(page: Page, usuario: str, senha: str) -> None:
     page.evaluate("document.querySelector('#password').value = ''")
     campo_senha.fill(senha)
 
-    # Aguarda o botão ficar ativo e a página estabilizar antes de submeter
+    # Aguarda o botão ficar visível e clica — sem espera fixa
+    log.info("Submetendo login...")
     btn = page.get_by_role("button", name=re.compile(r"acessar", re.IGNORECASE))
     btn.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
-    try:
-        page.wait_for_load_state("networkidle", timeout=TIMEOUT_CURTO)
-    except PlaywrightTimeout:
-        pass  # prossegue mesmo se a página não estabilizar completamente
-
-    log.info("Submetendo login...")
     btn.click()
-    page.wait_for_load_state("load")
+
+    # Aguarda navegação pós-login usando elemento que indica página logada
+    page.wait_for_load_state("domcontentloaded")
 
 
 def _fazer_login(page: Page, usuario: str, senha: str) -> None:
-    """Login com tratamento de sessão duplicada."""
+    """Login com tratamento de credenciais inválidas e sessão duplicada."""
     _tentar_login(page, usuario, senha)
 
     # Verifica credenciais inválidas
@@ -129,7 +141,7 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
         )
         sys.exit(
             "[ERRO] Login falhou: usuário ou senha incorretos.\n"
-            "       Verifique NOTAPARANA_USER no .env e a senha digitada."
+            "       Verifique o usuário digitado e tente novamente."
         )
     except PlaywrightTimeout:
         pass
@@ -141,7 +153,7 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
         ).first.wait_for(state="visible", timeout=TIMEOUT_CURTO)
 
         log.warning("Sessão duplicada detectada. Encerrando sessão anterior...")
-        page.goto(URL_SAIR, wait_until="load")
+        page.goto(URL_SAIR, wait_until="domcontentloaded")
         log.info("Sessão encerrada. Realizando novo login...")
 
         _tentar_login(page, usuario, senha)
@@ -150,9 +162,7 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
             page.locator("text=Usuário/Senha inválido.").first.wait_for(
                 state="visible", timeout=TIMEOUT_CURTO
             )
-            sys.exit(
-                "[ERRO] Login falhou após relogin: usuário ou senha incorretos."
-            )
+            sys.exit("[ERRO] Login falhou após relogin: usuário ou senha incorretos.")
         except PlaywrightTimeout:
             pass
 
@@ -173,8 +183,17 @@ def _fechar_modal_contato(page: Page) -> None:
         log.debug("Modal de contato não apareceu.")
 
 
+def _esta_no_formulario_doacao(page: Page) -> bool:
+    """Retorna True se o formulário de doação manual já está visível na página."""
+    try:
+        page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=2_000)
+        return True
+    except PlaywrightTimeout:
+        return False
+
+
 def _navegar_para_doacoes(page: Page) -> None:
-    """Clica em 'MINHAS DOAÇÕES' e depois em 'Doação manual'."""
+    """Clica em 'MINHAS DOAÇÕES' → 'Doação manual' e aguarda o formulário."""
     log.info("Navegando para MINHAS DOAÇÕES...")
     link_doacoes = page.get_by_role(
         "link", name=re.compile(r"minhas doa", re.IGNORECASE)
@@ -182,7 +201,6 @@ def _navegar_para_doacoes(page: Page) -> None:
     link_doacoes.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
     link_doacoes.click()
 
-    # Aguarda o link de Doação manual aparecer (indica que a aba carregou)
     log.info("Selecionando Doação manual...")
     link_manual = page.get_by_role(
         "link", name=re.compile(r"doa.{0,5}o manual", re.IGNORECASE)
@@ -190,10 +208,8 @@ def _navegar_para_doacoes(page: Page) -> None:
     link_manual.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
     link_manual.click()
 
-    # Aguarda o campo CNPJ aparecer (indica que o formulário está pronto)
-    page.locator(
-        "input[placeholder*='CNPJ'], input[id*='cnpj'], input[name*='cnpj']"
-    ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
+    # Confirma que o formulário carregou
+    page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
 
 
 def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: int) -> bool:
@@ -201,18 +217,12 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
     log.info(f"Doando chave {numero}/{total}: {chave[:10]}...")
 
     try:
-        campo_cnpj = page.locator(
-            "input[placeholder*='CNPJ'], input[id*='cnpj'], input[name*='cnpj']"
-        ).first
+        campo_cnpj = page.locator(_SEL_CNPJ).first
         campo_cnpj.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
         campo_cnpj.fill("")
         campo_cnpj.fill(cnpj_entidade)
 
-        campo_chave = page.locator(
-            "input[placeholder*='Chave'], input[placeholder*='chave'], "
-            "input[id*='chave'], input[name*='chave'], "
-            "input[maxlength='44']"
-        ).first
+        campo_chave = page.locator(_SEL_CHAVE).first
         campo_chave.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
         campo_chave.fill("")
         campo_chave.fill(chave)
@@ -221,17 +231,13 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
             "button", name=re.compile(r"doar documento", re.IGNORECASE)
         ).click()
 
-        # Verificação em duas etapas: aguarda estabilização da página,
-        # depois confirma que o formulário está pronto para a próxima nota
+        # Aguarda a página processar e o formulário estar pronto para a próxima nota
         page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_PADRAO)
         try:
             page.wait_for_load_state("networkidle", timeout=TIMEOUT_CURTO)
         except PlaywrightTimeout:
-            pass  # prossegue mesmo se houver requisições residuais
-        campo_cnpj_prox = page.locator(
-            "input[placeholder*='CNPJ'], input[id*='cnpj'], input[name*='cnpj']"
-        ).first
-        campo_cnpj_prox.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
+            pass
+        page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
 
         log.info(f"  ✓ Chave {numero}/{total} doada.")
         return True
@@ -245,21 +251,11 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
 
 
 # ---------------------------------------------------------------------------
-# API pública – três funções para controle externo do ciclo de vida
+# API pública
 # ---------------------------------------------------------------------------
 
 def iniciar_sessao(usuario: str, senha: str, headless: bool = False) -> tuple[Playwright, Browser, Page]:
-    """
-    Abre o navegador, faz login e retorna os objetos de sessão.
-
-    Args:
-        usuario:  CPF ou CNPJ do titular (somente dígitos).
-        senha:    Senha de acesso.
-        headless: Se True, executa sem janela gráfica.
-
-    Returns:
-        (pw, browser, page)
-    """
+    """Abre o navegador, faz login e retorna (pw, browser, page)."""
     pw      = sync_playwright().start()
     browser = pw.chromium.launch(headless=headless)
     page    = browser.new_context().new_page()
@@ -273,7 +269,8 @@ def iniciar_sessao(usuario: str, senha: str, headless: bool = False) -> tuple[Pl
 
 def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str]) -> dict:
     """
-    Navega para a doação manual e processa todas as chaves do lote.
+    Processa um lote de chaves de acesso.
+    Navega para o formulário apenas se ainda não estiver nele.
 
     Returns:
         {"sucesso": int, "erro": int, "chaves_com_erro": list}
@@ -283,7 +280,10 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str]) -> dict:
     if not chaves:
         return resultado
 
-    _navegar_para_doacoes(page)
+    if _esta_no_formulario_doacao(page):
+        log.info("Formulário de doação já está aberto. Pulando navegação.")
+    else:
+        _navegar_para_doacoes(page)
 
     for idx, chave in enumerate(chaves, start=1):
         if _doar_chave(page, cnpj_entidade, chave, idx, len(chaves)):
@@ -299,7 +299,7 @@ def encerrar_sessao(pw: Playwright, browser: Browser, page: Page) -> None:
     """Faz logout no site e encerra o navegador."""
     log.info("Encerrando sessão no Nota Paraná...")
     try:
-        page.goto(URL_SAIR, wait_until="load")
+        page.goto(URL_SAIR, wait_until="domcontentloaded")
         log.info("Logout realizado.")
     except Exception as exc:
         log.warning(f"Não foi possível acessar a URL de saída: {exc}")

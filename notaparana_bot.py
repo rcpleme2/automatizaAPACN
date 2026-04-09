@@ -38,6 +38,13 @@ TIMEOUT_PADRAO   = 30_000   # ms
 TIMEOUT_CURTO    =  5_000   # ms
 TIMEOUT_COOKIE   =    500   # ms – falha rápida na checagem de popup de cookies
 
+MSG_SUCESSO_DOACAO = "Documento fiscal doado com sucesso!"
+
+
+class CNPJInvalidoError(Exception):
+    """CNPJ da entidade inválido — portal retornou HTTP 400."""
+    pass
+
 
 # ---------------------------------------------------------------------------
 # Seletor do campo CNPJ (reutilizado em múltiplos pontos)
@@ -55,6 +62,15 @@ _SEL_CHAVE = (
 
 def _so_digitos(texto: str) -> str:
     return re.sub(r'\D', '', texto)
+
+
+def _is_xhr(response) -> bool:
+    """Identifica requisições XHR/Fetch do portal (exclui recursos estáticos)."""
+    return (
+        response.request.resource_type in ("xhr", "fetch")
+        and "notaparana" in response.url
+        and "/publico/" not in response.url
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -213,25 +229,74 @@ def _navegar_para_doacoes(page: Page) -> None:
 
 
 def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: int) -> bool:
-    """Preenche e submete o formulário de doação para uma única chave."""
+    """Preenche e submete o formulário de doação para uma única chave.
+
+    Verifica a resposta HTTP da consulta de CNPJ (200 = ok, 400 = inválido)
+    e da doação (200 + _mensagem de sucesso).
+
+    Raises:
+        CNPJInvalidoError: se a verificação do CNPJ retornar HTTP 400.
+    """
     log.info(f"Doando chave {numero}/{total}: {chave[:10]}...")
 
     try:
+        # ── 1. Preenche o CNPJ e dispara a verificação via botão de busca ──
         campo_cnpj = page.locator(_SEL_CNPJ).first
         campo_cnpj.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
         campo_cnpj.fill("")
         campo_cnpj.fill(cnpj_entidade)
 
+        try:
+            with page.expect_response(_is_xhr, timeout=TIMEOUT_PADRAO) as cnpj_resp_info:
+                page.locator("#busca-entidade").click()
+            cnpj_resp = cnpj_resp_info.value
+            if cnpj_resp.status == 400:
+                raise CNPJInvalidoError(
+                    f"CNPJ {cnpj_entidade} inválido — portal retornou HTTP 400."
+                )
+            log.info(f"  CNPJ verificado (HTTP {cnpj_resp.status}).")
+        except PlaywrightTimeout:
+            log.warning("  Verificação de CNPJ não interceptada (timeout). Prosseguindo.")
+
+        # ── 2. Preenche a chave de acesso ──────────────────────────────────
         campo_chave = page.locator(_SEL_CHAVE).first
         campo_chave.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
         campo_chave.fill("")
         campo_chave.fill(chave)
 
-        page.get_by_role(
-            "button", name=re.compile(r"doar documento", re.IGNORECASE)
-        ).click()
+        # ── 3. Submete a doação e verifica a resposta HTTP ─────────────────
+        doacao_confirmada = False
+        try:
+            with page.expect_response(_is_xhr, timeout=TIMEOUT_PADRAO) as doar_resp_info:
+                page.get_by_role(
+                    "button", name=re.compile(r"doar documento", re.IGNORECASE)
+                ).click()
+            doar_resp = doar_resp_info.value
+            if doar_resp.status == 200:
+                try:
+                    body = doar_resp.json()
+                    mensagem = body.get("_mensagem", "")
+                    if mensagem == MSG_SUCESSO_DOACAO:
+                        doacao_confirmada = True
+                        log.info(f"  ✓ Resposta confirmada: {MSG_SUCESSO_DOACAO}")
+                    else:
+                        log.error(f"  ✗ Mensagem inesperada na resposta: '{mensagem}'")
+                except Exception:
+                    # HTTP 200 mas resposta sem JSON legível → assume sucesso
+                    doacao_confirmada = True
+                    log.warning("  HTTP 200 recebido sem JSON legível. Assumindo sucesso.")
+            else:
+                log.error(f"  ✗ Doação retornou HTTP {doar_resp.status}.")
+                return False
+        except PlaywrightTimeout:
+            # Sem XHR interceptado: fallback ao comportamento anterior (verifica via UI)
+            log.warning("  Resposta da doação não interceptada (timeout). Prosseguindo com verificação via UI.")
+            doacao_confirmada = True
 
-        # Aguarda a página processar e o formulário estar pronto para a próxima nota
+        if not doacao_confirmada:
+            return False
+
+        # ── 4. Aguarda o formulário estar pronto para a próxima nota ───────
         page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_PADRAO)
         try:
             page.wait_for_load_state("networkidle", timeout=TIMEOUT_CURTO)
@@ -242,6 +307,8 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str, numero: int, total: 
         log.info(f"  ✓ Chave {numero}/{total} doada.")
         return True
 
+    except CNPJInvalidoError:
+        raise  # propaga para doar_lote tratar
     except PlaywrightTimeout as exc:
         log.error(f"  ✗ Timeout ao processar chave {numero}/{total}: {exc}")
         return False
@@ -273,9 +340,14 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str]) -> dict:
     Navega para o formulário apenas se ainda não estiver nele.
 
     Returns:
-        {"sucesso": int, "erro": int, "chaves_com_erro": list}
+        {
+            "sucesso": int,
+            "erro": int,
+            "chaves_com_erro": list,
+            "cnpj_invalido": bool,  # True se o CNPJ foi rejeitado (HTTP 400)
+        }
     """
-    resultado = {"sucesso": 0, "erro": 0, "chaves_com_erro": []}
+    resultado = {"sucesso": 0, "erro": 0, "chaves_com_erro": [], "cnpj_invalido": False}
 
     if not chaves:
         return resultado
@@ -286,11 +358,19 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str]) -> dict:
         _navegar_para_doacoes(page)
 
     for idx, chave in enumerate(chaves, start=1):
-        if _doar_chave(page, cnpj_entidade, chave, idx, len(chaves)):
-            resultado["sucesso"] += 1
-        else:
-            resultado["erro"] += 1
-            resultado["chaves_com_erro"].append(chave)
+        try:
+            if _doar_chave(page, cnpj_entidade, chave, idx, len(chaves)):
+                resultado["sucesso"] += 1
+            else:
+                resultado["erro"] += 1
+                resultado["chaves_com_erro"].append(chave)
+        except CNPJInvalidoError as exc:
+            log.error(str(exc))
+            resultado["cnpj_invalido"] = True
+            # Todas as notas a partir desta (inclusive) vão para a lista de erro
+            resultado["erro"] += len(chaves) - idx + 1
+            resultado["chaves_com_erro"].extend(chaves[idx - 1:])
+            break
 
     return resultado
 

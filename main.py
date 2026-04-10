@@ -189,6 +189,26 @@ def _tela_resultado(sucesso: int, erros: int, chaves_erro: list[str]) -> None:
         print(borda)
 
 
+def _pedir_cnpj_valido(cnpj_invalido: str) -> str:
+    """Informa ao operador que o CNPJ foi rejeitado e solicita o CNPJ correto."""
+    _limpar_tela()
+    print(_cor("=" * 62, _VERMELHO))
+    print(_cor("   CNPJ INVÁLIDO", _VERMELHO + _NEGRITO))
+    print(_cor("=" * 62, _VERMELHO))
+    print(f"\n   O CNPJ informado foi rejeitado pelo portal (HTTP 400).")
+    print(f"   CNPJ recusado: {cnpj_invalido}")
+    print("   Informe o CNPJ correto para prosseguir com as doações.\n")
+    print(_cor("-" * 62, _VERMELHO))
+
+    novo = ""
+    while len(novo) != 14:
+        raw = _input_com_padrao("CNPJ correto da entidade (14 dígitos)", "")
+        novo = _so_digitos(raw)
+        if len(novo) != 14:
+            print(f"   CNPJ deve ter 14 dígitos (informado: {len(novo)}).\n")
+    return novo
+
+
 def _perguntar_mais_notas() -> bool:
     print()
     print(_cor("-" * 62, _AZUL))
@@ -230,6 +250,7 @@ def main() -> None:
     # Navegador é aberto apenas no primeiro lançamento
     pw = browser = page = None
     houve_erro_geral = False
+    cnpj_verificado = False   # torna-se True após a 1ª verificação bem-sucedida
 
     try:
         while True:
@@ -255,9 +276,22 @@ def main() -> None:
                 print("\n   Iniciando sessão no Nota Paraná...")
                 pw, browser, page = iniciar_sessao(usuario, senha, headless=args.headless)
 
-            # ── Doação ───────────────────────────────────────────────────
+            # ── Doação (com retry em caso de CNPJ inválido) ──────────────
             _tela_processando(len(chaves))
-            resultado = doar_lote(page, cnpj_entidade, chaves)
+            chaves_lote = list(chaves)
+            while True:
+                resultado = doar_lote(page, cnpj_entidade, chaves_lote,
+                                      verificar_cnpj=not cnpj_verificado)
+                if resultado.get("cnpj_invalido"):
+                    cnpj_entidade = _pedir_cnpj_valido(cnpj_entidade)
+                    config["cnpj_entidade"] = cnpj_entidade
+                    _salvar_config(config)
+                    chaves_lote = resultado["chaves_com_erro"]
+                    # cnpj_verificado permanece False → novo CNPJ será verificado
+                    _tela_processando(len(chaves_lote))
+                    continue
+                cnpj_verificado = True  # CNPJ ok; lotes seguintes pulam a verificação
+                break
 
             # ── Resultado ────────────────────────────────────────────────
             _tela_resultado(resultado["sucesso"], resultado["erro"],

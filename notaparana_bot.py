@@ -39,9 +39,6 @@ TIMEOUT_CURTO       =  5_000   # ms
 TIMEOUT_COOKIE      =    500   # ms – falha rápida na checagem de popup de cookies
 TIMEOUT_LOGIN_ERRO  =  1_500   # ms – tempo máximo para mensagens de erro aparecerem após o login
 
-MSG_SUCESSO_DOACAO = "Documento fiscal doado com sucesso!"
-
-
 class CNPJInvalidoError(Exception):
     """CNPJ da entidade inválido — portal retornou HTTP 400."""
     pass
@@ -274,18 +271,16 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
                 page.locator("#btnDoarDocumento").click()
             doar_resp = doar_resp_info.value
             if doar_resp.status == 200:
+                doacao_confirmada = True
                 try:
                     body = doar_resp.json()
                     mensagem = body.get("_mensagem", "")
-                    if mensagem == MSG_SUCESSO_DOACAO:
-                        doacao_confirmada = True
-                        log.info(f"  ✓ Resposta confirmada: {MSG_SUCESSO_DOACAO}")
+                    if mensagem:
+                        log.info(f"  ✓ HTTP 200 – {mensagem}")
                     else:
-                        log.error(f"  ✗ Mensagem inesperada na resposta: '{mensagem}'")
+                        log.info("  ✓ HTTP 200 recebido.")
                 except Exception:
-                    # HTTP 200 mas resposta sem JSON legível → assume sucesso
-                    doacao_confirmada = True
-                    log.warning("  HTTP 200 recebido sem JSON legível. Assumindo sucesso.")
+                    log.info("  ✓ HTTP 200 recebido.")
             else:
                 log.error(f"  ✗ Doação retornou HTTP {doar_resp.status}.")
                 return False

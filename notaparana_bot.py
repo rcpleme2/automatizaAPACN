@@ -274,10 +274,10 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
                            portal (blur/change) e confere a resposta HTTP.
     verificar_cnpj=False → o CNPJ já está preenchido e verificado; pula o passo 1.
 
-    Após clicar em DOAR, aguarda a navegação automática do portal para a URL de
-    resultado (que contém '_mensagem' em caso de sucesso ou '_erro' em caso de
-    rejeição) e determina o resultado a partir dessa URL — eliminando a
-    dependência de captura genérica de XHR e os problemas de corrida de timing.
+    Após clicar em DOAR, captura especificamente o POST para documentoFiscalDoadoWeb
+    (usando _is_doacao_post) para detectar erros 500 imediatamente, e aguarda a
+    navegação automática do portal para a URL de resultado ('_mensagem' ou '_erro')
+    para determinar sucesso/falha — sem dependência de XHR genérico.
 
     Raises:
         CNPJInvalidoError: se a verificação do CNPJ retornar HTTP 400.
@@ -305,16 +305,38 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
                 log.warning("  Verificação de CNPJ não interceptada (timeout). Prosseguindo.")
 
         # ── 2. Preenche a chave de acesso ──────────────────────────────────
+        # O Tab dispara os eventos blur/change que o JS do portal usa para
+        # capturar o valor do campo antes de montar o payload do POST.
         campo_chave = page.locator(_SEL_CHAVE).first
         campo_chave.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
         campo_chave.fill("")
         campo_chave.fill(chave)
+        campo_chave.press("Tab")   # garante que blur/change sejam disparados
 
-        # ── 3. Clica em "DOAR DOCUMENTOS" e aguarda a navegação do portal ──
-        # O portal sempre redireciona após o POST:
-        #   sucesso → ?_mensagem=Documento fiscal doado com sucesso!
-        #   erro    → ?_erro={"chaveAcesso":"Chave de acesso inválida."}
-        page.locator("#btnDoarDocumento").click()
+        # ── 3. Clica em "DOAR DOCUMENTOS" e captura resposta + navegação ──
+        # Intercepta especificamente o POST de doação para detectar HTTP 500
+        # rapidamente, sem esperar o timeout de navegação inteiro.
+        # Para 200 e 400 o portal sempre redireciona para a URL de resultado.
+        status_post = None
+        try:
+            with page.expect_response(_is_doacao_post, timeout=TIMEOUT_NAVEGACAO) as resp_info:
+                page.locator("#btnDoarDocumento").click()
+            doacao_resp = resp_info.value
+            status_post = doacao_resp.status
+            log.debug(f"  POST documentoFiscalDoadoWeb retornou HTTP {status_post}.")
+        except PlaywrightTimeout:
+            log.warning("  Resposta do POST de doação não interceptada. Prosseguindo com verificação por URL.")
+
+        if status_post == 500:
+            try:
+                corpo = doacao_resp.text()[:300]
+            except Exception:
+                corpo = "(sem corpo)"
+            log.error(f"  ✗ Servidor retornou HTTP 500 – {corpo}")
+            return False
+
+        # Aguarda o redirecionamento do portal para a URL de resultado.
+        # (Após 200 e 400 o JS sempre navega; para outros status pode não navegar.)
         try:
             page.wait_for_url(
                 lambda url: "_mensagem" in url or "_erro" in url,
@@ -346,7 +368,7 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
             page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
             return False
 
-        # URL sem parâmetro de resultado (timeout ou estado inesperado)
+        # URL sem parâmetro de resultado (status inesperado ou timeout)
         log.error(f"  ✗ Resultado da doação indeterminado. URL atual: {url_atual}")
         return False
 

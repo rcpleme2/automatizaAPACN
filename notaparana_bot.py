@@ -307,11 +307,13 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
         # ── 2. Preenche a chave de acesso ──────────────────────────────────
         # O Tab dispara os eventos blur/change que o JS do portal usa para
         # capturar o valor do campo antes de montar o payload do POST.
+        # O wait_for_timeout garante que o JS processe o evento antes do clique.
         campo_chave = page.locator(_SEL_CHAVE).first
         campo_chave.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
         campo_chave.fill("")
         campo_chave.fill(chave)
-        campo_chave.press("Tab")   # garante que blur/change sejam disparados
+        campo_chave.press("Tab")          # dispara blur/change
+        page.wait_for_timeout(1_000)      # aguarda JS capturar o valor
 
         # ── 3. Clica em "DOAR DOCUMENTOS" e captura resposta + navegação ──
         # Intercepta especificamente o POST de doação para detectar HTTP 500
@@ -332,8 +334,9 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
                 corpo = doacao_resp.text()[:300]
             except Exception:
                 corpo = "(sem corpo)"
-            log.error(f"  ✗ Servidor retornou HTTP 500 – {corpo}")
-            return False
+            msg_500 = f"HTTP 500 – {corpo}"
+            log.error(f"  ✗ Servidor retornou {msg_500}")
+            return False, msg_500
 
         # Aguarda o redirecionamento do portal para a URL de resultado.
         # (Após 200 e 400 o JS sempre navega; para outros status pode não navegar.)
@@ -352,9 +355,8 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
         if "_mensagem" in params:
             mensagem = params["_mensagem"]
             log.info(f"  ✓ Chave {numero}/{total} doada – {mensagem}")
-            # Aguarda formulário pronto para a próxima nota
             page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
-            return True
+            return True, ""
 
         if "_erro" in params:
             erro_raw = params["_erro"]
@@ -364,22 +366,23 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
             except Exception:
                 msg_erro = erro_raw or "Erro desconhecido"
             log.error(f"  ✗ Doação rejeitada (HTTP 400) – {msg_erro}")
-            # Aguarda formulário pronto para tentar a próxima nota
             page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
-            return False
+            return False, msg_erro
 
-        # URL sem parâmetro de resultado (status inesperado ou timeout)
-        log.error(f"  ✗ Resultado da doação indeterminado. URL atual: {url_atual}")
-        return False
+        msg_indet = f"Resultado indeterminado (URL: {url_atual})"
+        log.error(f"  ✗ {msg_indet}")
+        return False, msg_indet
 
     except CNPJInvalidoError:
         raise
     except PlaywrightTimeout as exc:
-        log.error(f"  ✗ Timeout ao processar chave {numero}/{total}: {exc}")
-        return False
+        msg = f"Timeout: {exc}"
+        log.error(f"  ✗ {msg} (chave {numero}/{total})")
+        return False, msg
     except Exception as exc:
-        log.error(f"  ✗ Erro inesperado na chave {numero}/{total}: {exc}")
-        return False
+        msg = f"Erro inesperado: {exc}"
+        log.error(f"  ✗ {msg} (chave {numero}/{total})")
+        return False, msg
 
 
 # ---------------------------------------------------------------------------
@@ -427,10 +430,11 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
 
     Returns:
         {
-            "sucesso":               int,
-            "erro":                  int,
-            "chaves_com_erro":       list,
-            "cnpj_invalido":         bool,
+            "sucesso":                int,
+            "erro":                   int,
+            "chaves_com_erro":        list[str],
+            "erros_com_mensagem":     list[tuple[str, str]],  # (chave, msg_erro)
+            "cnpj_invalido":          bool,
             "parou_por_limite_erros": bool,
         }
     """
@@ -438,6 +442,7 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
         "sucesso": 0,
         "erro": 0,
         "chaves_com_erro": [],
+        "erros_com_mensagem": [],
         "cnpj_invalido": False,
         "parou_por_limite_erros": False,
     }
@@ -455,13 +460,16 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
     for idx, chave in enumerate(chaves, start=1):
         checar = verificar_cnpj and idx == 1
         try:
-            sucesso = _doar_chave(page, cnpj_entidade, chave, idx, len(chaves),
-                                  verificar_cnpj=checar)
+            sucesso, msg_erro = _doar_chave(page, cnpj_entidade, chave, idx, len(chaves),
+                                            verificar_cnpj=checar)
         except CNPJInvalidoError as exc:
             log.error(str(exc))
             resultado["cnpj_invalido"] = True
+            msg_cnpj = str(exc)
+            for c in chaves[idx - 1:]:
+                resultado["chaves_com_erro"].append(c)
+                resultado["erros_com_mensagem"].append((c, msg_cnpj))
             resultado["erro"] += len(chaves) - idx + 1
-            resultado["chaves_com_erro"].extend(chaves[idx - 1:])
             break
 
         if sucesso:
@@ -470,6 +478,7 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
         else:
             resultado["erro"] += 1
             resultado["chaves_com_erro"].append(chave)
+            resultado["erros_com_mensagem"].append((chave, msg_erro))
             erros_consecutivos += 1
 
             if erros_consecutivos >= LIMITE_ERROS_CHAVE:
@@ -478,9 +487,11 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
                     "Interrompendo lote para verificação do operador."
                 )
                 resultado["parou_por_limite_erros"] = True
-                # Adiciona as chaves restantes (ainda não processadas) à lista de erro
+                msg_nao_proc = "Não processada (lote interrompido por erros consecutivos)"
+                for c in chaves[idx:]:
+                    resultado["chaves_com_erro"].append(c)
+                    resultado["erros_com_mensagem"].append((c, msg_nao_proc))
                 resultado["erro"] += len(chaves) - idx
-                resultado["chaves_com_erro"].extend(chaves[idx:])
                 break
 
     return resultado

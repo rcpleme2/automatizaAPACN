@@ -193,7 +193,8 @@ def _tela_processando(total: int) -> None:
     print("   Não feche esta janela.\n")
 
 
-def _tela_resultado(sucesso: int, erros: int, chaves_erro: list[str]) -> None:
+def _tela_resultado(sucesso: int, erros: int,
+                    erros_com_mensagem: list[tuple[str, str]]) -> None:
     _limpar_tela()
 
     if erros == 0:
@@ -211,7 +212,11 @@ def _tela_resultado(sucesso: int, erros: int, chaves_erro: list[str]) -> None:
         print(borda)
         print(titulo)
         print(borda)
-        print("\n   Verifique sua conexão e tente novamente.\n")
+        print(f"\n   {_cor(str(erros), _VERMELHO + _NEGRITO)} nota(s) com erro:\n")
+        for chave, msg in erros_com_mensagem:
+            print(f"      •  {fmt_chave(chave)}")
+            print(f"         {_cor(msg, _VERMELHO)}")
+        print()
         print(borda)
 
     else:
@@ -222,8 +227,9 @@ def _tela_resultado(sucesso: int, erros: int, chaves_erro: list[str]) -> None:
         print(borda)
         print(f"\n   {_cor(str(sucesso), _VERDE + _NEGRITO)} nota(s) doadas com sucesso.")
         print(f"   {_cor(str(erros),    _VERMELHO + _NEGRITO)} nota(s) com erro:\n")
-        for c in chaves_erro:
-            print(f"      •  {fmt_chave(c)}")
+        for chave, msg in erros_com_mensagem:
+            print(f"      •  {fmt_chave(chave)}")
+            print(f"         {_cor(msg, _VERMELHO)}")
         print()
         print(borda)
 
@@ -393,7 +399,7 @@ def main() -> None:
             _tela_resultado(
                 resultado["sucesso"],
                 resultado["erro"],
-                resultado["chaves_com_erro"],
+                resultado["erros_com_mensagem"],
             )
 
             if resultado["erro"] > 0:
@@ -420,7 +426,7 @@ def main() -> None:
             _tela_resultado(
                 resultado_retry["sucesso"],
                 resultado_retry["erro"],
-                resultado_retry["chaves_com_erro"],
+                resultado_retry["erros_com_mensagem"],
             )
             if resultado_retry["erro"] == 0:
                 houve_erro_geral = False   # todos os erros foram recuperados

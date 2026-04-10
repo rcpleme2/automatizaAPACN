@@ -7,9 +7,10 @@ Todas as credenciais são recebidas como parâmetros em tempo de execução.
 Nenhum dado sensível é lido de arquivo neste módulo.
 """
 
-import sys
+import json
 import logging
 import re
+from urllib.parse import urlparse, parse_qs, unquote
 
 from playwright.sync_api import (
     sync_playwright,
@@ -37,15 +38,29 @@ URL_SAIR         = "https://notaparana.pr.gov.br/nfprweb/publico/sair"
 TIMEOUT_PADRAO      = 30_000   # ms
 TIMEOUT_CURTO       =  5_000   # ms
 TIMEOUT_COOKIE      =    500   # ms – falha rápida na checagem de popup de cookies
-TIMEOUT_LOGIN_ERRO  =  1_500   # ms – tempo máximo para mensagens de erro aparecerem após o login
+TIMEOUT_LOGIN_ERRO  =  1_500   # ms – tempo máximo para mensagens de erro após o login
+TIMEOUT_NAVEGACAO   = 20_000   # ms – aguarda redirecionamento após clicar em DOAR
+
+# Número máximo de erros 400 consecutivos antes de pausar e perguntar ao operador
+LIMITE_ERROS_CHAVE = 5
+
+
+# ---------------------------------------------------------------------------
+# Exceções públicas
+# ---------------------------------------------------------------------------
 
 class CNPJInvalidoError(Exception):
     """CNPJ da entidade inválido — portal retornou HTTP 400."""
     pass
 
 
+class CredenciaisInvalidasError(Exception):
+    """Usuário ou senha rejeitados pelo portal."""
+    pass
+
+
 # ---------------------------------------------------------------------------
-# Seletor do campo CNPJ (reutilizado em múltiplos pontos)
+# Seletores do formulário (reutilizados em múltiplos pontos)
 # ---------------------------------------------------------------------------
 _SEL_CNPJ  = "input[placeholder*='CNPJ'], input[id*='cnpj'], input[name*='cnpj']"
 _SEL_CHAVE = (
@@ -62,13 +77,37 @@ def _so_digitos(texto: str) -> str:
     return re.sub(r'\D', '', texto)
 
 
-def _is_xhr(response) -> bool:
-    """Identifica requisições XHR/Fetch do portal (exclui recursos estáticos)."""
+def _is_cnpj_check(response) -> bool:
+    """Identifica a requisição de verificação de CNPJ da entidade."""
     return (
         response.request.resource_type in ("xhr", "fetch")
-        and "notaparana" in response.url
-        and "/publico/" not in response.url
+        and "entidadePorCnpj" in response.url
     )
+
+
+def _is_doacao_post(response) -> bool:
+    """Identifica a requisição POST de doação de documento fiscal."""
+    return (
+        response.request.resource_type in ("xhr", "fetch")
+        and "documentoFiscalDoadoWeb" in response.url
+    )
+
+
+def _extrair_params_url(url: str) -> dict:
+    """Retorna os parâmetros de query string de uma URL como dict simples."""
+    params = parse_qs(urlparse(url).query)
+    return {k: unquote(v[0]) for k, v in params.items()}
+
+
+def _msg_erro_400(response) -> str:
+    """Tenta ler a mensagem de erro de uma resposta HTTP 400 em JSON."""
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            return "; ".join(f"{k}: {v}" for k, v in body.items())
+        return str(body)
+    except Exception:
+        return "Erro 400 (corpo não legível)"
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +159,6 @@ def _fechar_popup_cookies(page: Page) -> None:
 def _tentar_login(page: Page, usuario: str, senha: str) -> None:
     """Preenche e submete o formulário de login uma única vez."""
     log.info(f"Acessando página de autenticação: {URL_LOGIN_DIRETO}")
-    # domcontentloaded é suficiente para o formulário aparecer e é mais rápido que "load"
     page.goto(URL_LOGIN_DIRETO, wait_until="domcontentloaded")
     _fechar_popup_cookies(page)
 
@@ -134,18 +172,20 @@ def _tentar_login(page: Page, usuario: str, senha: str) -> None:
     page.evaluate("document.querySelector('#password').value = ''")
     campo_senha.fill(senha)
 
-    # Aguarda o botão ficar visível e clica — sem espera fixa
     log.info("Submetendo login...")
     btn = page.get_by_role("button", name=re.compile(r"acessar", re.IGNORECASE))
     btn.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
     btn.click()
 
-    # Aguarda navegação pós-login usando elemento que indica página logada
     page.wait_for_load_state("domcontentloaded")
 
 
 def _fazer_login(page: Page, usuario: str, senha: str) -> None:
-    """Login com tratamento de credenciais inválidas e sessão duplicada."""
+    """Login com tratamento de credenciais inválidas e sessão duplicada.
+
+    Raises:
+        CredenciaisInvalidasError: se usuário ou senha estiverem incorretos.
+    """
     _tentar_login(page, usuario, senha)
 
     # Verifica credenciais inválidas
@@ -153,9 +193,8 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
         page.locator("text=Usuário/Senha inválido.").first.wait_for(
             state="visible", timeout=TIMEOUT_LOGIN_ERRO
         )
-        sys.exit(
-            "[ERRO] Login falhou: usuário ou senha incorretos.\n"
-            "       Verifique o usuário digitado e tente novamente."
+        raise CredenciaisInvalidasError(
+            "Usuário ou senha incorretos. Verifique e tente novamente."
         )
     except PlaywrightTimeout:
         pass
@@ -176,7 +215,9 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
             page.locator("text=Usuário/Senha inválido.").first.wait_for(
                 state="visible", timeout=TIMEOUT_LOGIN_ERRO
             )
-            sys.exit("[ERRO] Login falhou após relogin: usuário ou senha incorretos.")
+            raise CredenciaisInvalidasError(
+                "Usuário ou senha incorretos após relogin."
+            )
         except PlaywrightTimeout:
             pass
 
@@ -222,7 +263,6 @@ def _navegar_para_doacoes(page: Page) -> None:
     link_manual.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
     link_manual.click()
 
-    # Confirma que o formulário carregou
     page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
 
 
@@ -233,6 +273,11 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
     verificar_cnpj=True  → preenche o CNPJ, aciona a verificação automática do
                            portal (blur/change) e confere a resposta HTTP.
     verificar_cnpj=False → o CNPJ já está preenchido e verificado; pula o passo 1.
+
+    Após clicar em DOAR, aguarda a navegação automática do portal para a URL de
+    resultado (que contém '_mensagem' em caso de sucesso ou '_erro' em caso de
+    rejeição) e determina o resultado a partir dessa URL — eliminando a
+    dependência de captura genérica de XHR e os problemas de corrida de timing.
 
     Raises:
         CNPJInvalidoError: se a verificação do CNPJ retornar HTTP 400.
@@ -246,13 +291,14 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
             campo_cnpj.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
             campo_cnpj.fill("")
             try:
-                with page.expect_response(_is_xhr, timeout=TIMEOUT_PADRAO) as cnpj_resp_info:
+                with page.expect_response(_is_cnpj_check, timeout=TIMEOUT_PADRAO) as resp_info:
                     campo_cnpj.fill(cnpj_entidade)
-                    campo_cnpj.press("Tab")  # dispara blur/change → verificação automática
-                cnpj_resp = cnpj_resp_info.value
+                    campo_cnpj.press("Tab")
+                cnpj_resp = resp_info.value
                 if cnpj_resp.status == 400:
+                    msg = _msg_erro_400(cnpj_resp)
                     raise CNPJInvalidoError(
-                        f"CNPJ {cnpj_entidade} inválido — portal retornou HTTP 400."
+                        f"CNPJ {cnpj_entidade} rejeitado pelo portal (HTTP 400) – {msg}"
                     )
                 log.info(f"  CNPJ verificado (HTTP {cnpj_resp.status}).")
             except PlaywrightTimeout:
@@ -264,47 +310,48 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
         campo_chave.fill("")
         campo_chave.fill(chave)
 
-        # ── 3. Clica em "DOAR DOCUMENTOS" e verifica a resposta HTTP ─────────
-        doacao_confirmada = False
+        # ── 3. Clica em "DOAR DOCUMENTOS" e aguarda a navegação do portal ──
+        # O portal sempre redireciona após o POST:
+        #   sucesso → ?_mensagem=Documento fiscal doado com sucesso!
+        #   erro    → ?_erro={"chaveAcesso":"Chave de acesso inválida."}
+        page.locator("#btnDoarDocumento").click()
         try:
-            with page.expect_response(_is_xhr, timeout=TIMEOUT_PADRAO) as doar_resp_info:
-                page.locator("#btnDoarDocumento").click()
-            doar_resp = doar_resp_info.value
-            if doar_resp.status == 200:
-                doacao_confirmada = True
-                try:
-                    body = doar_resp.json()
-                    mensagem = body.get("_mensagem", "")
-                    if mensagem:
-                        log.info(f"  ✓ HTTP 200 – {mensagem}")
-                    else:
-                        log.info("  ✓ HTTP 200 recebido.")
-                except Exception:
-                    log.info("  ✓ HTTP 200 recebido.")
-            else:
-                log.error(f"  ✗ Doação retornou HTTP {doar_resp.status}.")
-                return False
+            page.wait_for_url(
+                lambda url: "_mensagem" in url or "_erro" in url,
+                timeout=TIMEOUT_NAVEGACAO,
+            )
         except PlaywrightTimeout:
-            # Sem XHR interceptado: fallback ao comportamento anterior (verifica via UI)
-            log.warning("  Resposta da doação não interceptada (timeout). Prosseguindo com verificação via UI.")
-            doacao_confirmada = True
+            log.warning("  Redirecionamento pós-doação não detectado. Verificando página atual.")
 
-        if not doacao_confirmada:
+        # ── 4. Interpreta resultado via URL ────────────────────────────────
+        url_atual = page.url
+        params = _extrair_params_url(url_atual)
+
+        if "_mensagem" in params:
+            mensagem = params["_mensagem"]
+            log.info(f"  ✓ Chave {numero}/{total} doada – {mensagem}")
+            # Aguarda formulário pronto para a próxima nota
+            page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
+            return True
+
+        if "_erro" in params:
+            erro_raw = params["_erro"]
+            try:
+                erro_obj = json.loads(erro_raw)
+                msg_erro = "; ".join(f"{k}: {v}" for k, v in erro_obj.items())
+            except Exception:
+                msg_erro = erro_raw or "Erro desconhecido"
+            log.error(f"  ✗ Doação rejeitada (HTTP 400) – {msg_erro}")
+            # Aguarda formulário pronto para tentar a próxima nota
+            page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
             return False
 
-        # ── 4. Aguarda o formulário estar pronto para a próxima nota ───────
-        page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_PADRAO)
-        try:
-            page.wait_for_load_state("networkidle", timeout=TIMEOUT_CURTO)
-        except PlaywrightTimeout:
-            pass
-        page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
-
-        log.info(f"  ✓ Chave {numero}/{total} doada.")
-        return True
+        # URL sem parâmetro de resultado (timeout ou estado inesperado)
+        log.error(f"  ✗ Resultado da doação indeterminado. URL atual: {url_atual}")
+        return False
 
     except CNPJInvalidoError:
-        raise  # propaga para doar_lote tratar
+        raise
     except PlaywrightTimeout as exc:
         log.error(f"  ✗ Timeout ao processar chave {numero}/{total}: {exc}")
         return False
@@ -317,16 +364,33 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
 # API pública
 # ---------------------------------------------------------------------------
 
-def iniciar_sessao(usuario: str, senha: str, headless: bool = False) -> tuple[Playwright, Browser, Page]:
-    """Abre o navegador, faz login e retorna (pw, browser, page)."""
+def abrir_navegador(headless: bool = False) -> tuple[Playwright, Browser, Page]:
+    """Abre o navegador e retorna (pw, browser, page) sem fazer login."""
     pw      = sync_playwright().start()
     browser = pw.chromium.launch(headless=headless)
     page    = browser.new_context().new_page()
     page.set_default_timeout(TIMEOUT_PADRAO)
+    return pw, browser, page
 
+
+def fazer_login_portal(page: Page, usuario: str, senha: str) -> None:
+    """Realiza login no portal Nota Paraná em uma página já aberta.
+
+    Raises:
+        CredenciaisInvalidasError: se usuário ou senha estiverem incorretos.
+    """
     _fazer_login(page, _so_digitos(usuario), senha)
     _fechar_modal_contato(page)
 
+
+def iniciar_sessao(usuario: str, senha: str, headless: bool = False) -> tuple[Playwright, Browser, Page]:
+    """Abre o navegador, faz login e retorna (pw, browser, page).
+
+    Raises:
+        CredenciaisInvalidasError: se usuário ou senha estiverem incorretos.
+    """
+    pw, browser, page = abrir_navegador(headless)
+    fazer_login_portal(page, usuario, senha)
     return pw, browser, page
 
 
@@ -334,20 +398,27 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
               verificar_cnpj: bool = True) -> dict:
     """
     Processa um lote de chaves de acesso.
-    Navega para o formulário apenas se ainda não estiver nele.
 
-    verificar_cnpj=True  → verifica o CNPJ na primeira nota do lote.
-    verificar_cnpj=False → CNPJ já foi verificado em lote anterior; pula a verificação.
+    Para após LIMITE_ERROS_CHAVE erros consecutivos de HTTP 400, definindo
+    'parou_por_limite_erros': True no resultado para que o chamador decida
+    se continua ou encerra.
 
     Returns:
         {
-            "sucesso": int,
-            "erro": int,
-            "chaves_com_erro": list,
-            "cnpj_invalido": bool,  # True se o CNPJ foi rejeitado (HTTP 400)
+            "sucesso":               int,
+            "erro":                  int,
+            "chaves_com_erro":       list,
+            "cnpj_invalido":         bool,
+            "parou_por_limite_erros": bool,
         }
     """
-    resultado = {"sucesso": 0, "erro": 0, "chaves_com_erro": [], "cnpj_invalido": False}
+    resultado = {
+        "sucesso": 0,
+        "erro": 0,
+        "chaves_com_erro": [],
+        "cnpj_invalido": False,
+        "parou_por_limite_erros": False,
+    }
 
     if not chaves:
         return resultado
@@ -357,23 +428,38 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
     else:
         _navegar_para_doacoes(page)
 
+    erros_consecutivos = 0
+
     for idx, chave in enumerate(chaves, start=1):
-        # Verifica o CNPJ apenas na primeira nota (e somente se solicitado)
         checar = verificar_cnpj and idx == 1
         try:
-            if _doar_chave(page, cnpj_entidade, chave, idx, len(chaves),
-                           verificar_cnpj=checar):
-                resultado["sucesso"] += 1
-            else:
-                resultado["erro"] += 1
-                resultado["chaves_com_erro"].append(chave)
+            sucesso = _doar_chave(page, cnpj_entidade, chave, idx, len(chaves),
+                                  verificar_cnpj=checar)
         except CNPJInvalidoError as exc:
             log.error(str(exc))
             resultado["cnpj_invalido"] = True
-            # Todas as notas a partir desta (inclusive) vão para a lista de erro
             resultado["erro"] += len(chaves) - idx + 1
             resultado["chaves_com_erro"].extend(chaves[idx - 1:])
             break
+
+        if sucesso:
+            resultado["sucesso"] += 1
+            erros_consecutivos = 0
+        else:
+            resultado["erro"] += 1
+            resultado["chaves_com_erro"].append(chave)
+            erros_consecutivos += 1
+
+            if erros_consecutivos >= LIMITE_ERROS_CHAVE:
+                log.warning(
+                    f"  {LIMITE_ERROS_CHAVE} erros consecutivos. "
+                    "Interrompendo lote para verificação do operador."
+                )
+                resultado["parou_por_limite_erros"] = True
+                # Adiciona as chaves restantes (ainda não processadas) à lista de erro
+                resultado["erro"] += len(chaves) - idx
+                resultado["chaves_com_erro"].extend(chaves[idx:])
+                break
 
     return resultado
 

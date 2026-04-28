@@ -23,7 +23,7 @@ Uso:
 """
 
 import argparse
-import getpass
+
 import json
 import re
 import sys
@@ -118,12 +118,11 @@ def _tela_credenciais(config: dict) -> tuple[str, str, str]:
         if len(cnpj_entidade) != 14:
             print(f"   CNPJ deve ter 14 dígitos (informado: {len(cnpj_entidade)}).\n")
 
-    # Senha (oculta, nunca salva)
+    # Senha (nunca salva)
     print()
-    print("   A senha não será exibida durante a digitação.")
     senha = ""
     while not senha:
-        senha = getpass.getpass("   Senha: ")
+        senha = input("   Senha: ")
         if not senha:
             print("   Campo obrigatório.\n")
 
@@ -149,10 +148,9 @@ def _tela_login_invalido(usuario: str) -> tuple[str, str]:
     novo_usuario = _so_digitos(novo_usuario_raw) if novo_usuario_raw else usuario
 
     print()
-    print("   A senha não será exibida durante a digitação.")
     nova_senha = ""
     while not nova_senha:
-        nova_senha = getpass.getpass("   Senha: ")
+        nova_senha = input("   Senha: ")
         if not nova_senha:
             print("   Campo obrigatório.\n")
 

@@ -2,6 +2,9 @@
 
 Sistema de coleta de notas fiscais do Paraná via leitor de QR code/código de barras e envio automático para doação no portal **Nota Paraná**.
 
+Inicializar sempre pelo arquivo inicia.bat
+
+
 ## Visão geral do fluxo
 
 ```
@@ -123,7 +126,7 @@ automatizaAPACN/
 
 ## Segurança
 
-- **Senha nunca é salva** — solicitada a cada execução via `getpass` (entrada oculta).
+- **Senha nunca é salva** — solicitada a cada execução via `getpass`.
 - CPF e CNPJ da entidade são salvos em `config.json` apenas para conveniência do operador.
 - O `config.json` está no `.gitignore` e não deve ser versionado.
 - O script não grava credenciais em logs ou arquivos de saída.

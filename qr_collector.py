@@ -111,6 +111,9 @@ if os.name == "nt":
         while True:
             if msvcrt.kbhit():
                 ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):   # tecla especial (setas, F1...): descarta
+                    msvcrt.getwch()
+                    continue
                 if ch in ("\r", "\n"):
                     break
                 if ch == "\x08" and buffer:   # backspace

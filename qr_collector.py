@@ -16,6 +16,7 @@ import re
 import os
 import sys
 import time
+from datetime import datetime
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -198,12 +199,18 @@ def _cabecalho(total: int, invalidas: int) -> None:
 # Loop principal de coleta
 # ---------------------------------------------------------------------------
 
-def coletar_qr_codes() -> list[str]:
+def coletar_qr_codes(
+    ja_processadas: Optional[dict[str, tuple[str, datetime]]] = None,
+) -> list[str]:
     """
     Aguarda leituras do leitor de código de barras/QR (entrada via teclado HID).
 
+    ja_processadas → mapa chave → (status, data) do histórico local; essas
+                     notas são recusadas na leitura (já doadas ou fora do prazo).
+
     Retorna lista de chaves de acesso válidas e únicas.
     """
+    ja_processadas = ja_processadas or {}
     chaves: list[str] = []
     invalidas: int = 0
     historico: list[str] = []   # log de mensagens de feedback
@@ -235,6 +242,19 @@ def coletar_qr_codes() -> list[str]:
         if chave in chaves:
             msg = _cor(
                 f"  ⚠  Nota já registrada (ignorada): {_fmt(chave)}",
+                _AMARELO
+            )
+            historico.append(msg)
+            _cabecalho(len(chaves), invalidas)
+            for linha in historico[-15:]:
+                print(linha)
+            continue
+
+        if chave in ja_processadas:
+            status, quando = ja_processadas[chave]
+            situacao = "já doada" if status == "doada" else "recusada por prazo"
+            msg = _cor(
+                f"  ⚠  Nota {situacao} em {quando:%d/%m/%Y} (ignorada): {_fmt(chave)}",
                 _AMARELO
             )
             historico.append(msg)

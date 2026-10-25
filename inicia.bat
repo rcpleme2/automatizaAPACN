@@ -19,6 +19,24 @@ if not exist venv (
     call venv\Scripts\activate
 )
 
+:: Verifica se ha versao nova no GitHub (sai com 2 quando requirements.txt mudou)
+python atualizador.py
+if errorlevel 2 (
+    echo [!] Atualizando dependencias...
+    pip install -r requirements.txt
+    playwright install chromium
+)
+
+:: O proprio inicializador e baixado como inicia.bat.novo; troca e reinicia.
+:: O bloco entre parenteses e lido inteiro antes de executar, por isso a troca
+:: do arquivo em uso e segura aqui.
+if exist inicia.bat.novo (
+    move /y inicia.bat.novo inicia.bat >nul
+    echo [OK] Inicializador atualizado. Reiniciando...
+    start "" "%~f0"
+    exit
+)
+
 echo [OK] Iniciando script principal...
 echo.
 

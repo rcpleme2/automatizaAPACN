@@ -4,39 +4,43 @@ main.py
 Ponto de entrada da automação de doação no Nota Paraná.
 
 Fluxo:
-  1. Solicita usuário, CNPJ da entidade e senha (esta última não é salva).
-     Usuário e CNPJ são pré-preenchidos com os valores da última execução.
-  2. Abre o navegador e faz login no portal.
-     Se as credenciais estiverem erradas, pede novamente SEM fechar o navegador.
-  3. Loop:
-       a. Coleta QR codes via leitor USB.
-       b. Confirmação do operador.
-       c. Doação automática no portal (mesmo navegador).
-       d. Exibe resultado visual.
-       e. Se houver ≥ LIMITE_ERROS_CHAVE erros consecutivos, pergunta se continua.
-       f. Pergunta se deseja lançar mais notas.
-  4. Ao encerrar, tenta automaticamente relançar todas as notas com erro.
-  5. Faz logout no site e encerra o navegador.
+  1. Menu principal:
+       1 = Lançar notas   2 = Relatório do histórico   0 = Sair
+  2. Lançar notas:
+       a. Na primeira vez, solicita usuário, CNPJ da entidade e senha
+          (esta última não é salva). Usuário e CNPJ vêm pré-preenchidos.
+       b. Coleta QR codes via leitor USB (notas já doadas neste computador
+          são recusadas na leitura).
+       c. Confirmação do operador.
+       d. Abre o navegador e faz login (apenas no primeiro lote).
+          Se as credenciais estiverem erradas, pede novamente SEM fechar o navegador.
+       e. Doação automática; cada resultado definitivo vai para o histórico.
+          Se a sessão expirar, o login é refeito automaticamente.
+       f. Se houver LIMITE_ERROS_CHAVE erros consecutivos, pergunta se continua.
+       g. Exibe o resultado e volta ao menu.
+  3. Relatório: gera um HTML com as notas doadas no período informado.
+  4. Ao sair, tenta automaticamente relançar todas as notas com erro,
+     faz logout no site e encerra o navegador.
 
 Uso:
     python main.py [--headless]
 """
 
 import argparse
-
 import json
-import re
 import sys
+from datetime import date, datetime
 from pathlib import Path
 
+import historico
 from qr_collector import coletar_qr_codes, _fmt as fmt_chave, _cor, \
-    _VERDE, _VERMELHO, _AMARELO, _AZUL, _NEGRITO, _RESET, _limpar_tela
+    _VERDE, _VERMELHO, _AMARELO, _AZUL, _NEGRITO, _limpar_tela
 from notaparana_bot import (
     abrir_navegador,
     fazer_login_portal,
-    iniciar_sessao,
     doar_lote,
     encerrar_sessao,
+    so_digitos,
     CredenciaisInvalidasError,
     LIMITE_ERROS_CHAVE,
 )
@@ -79,8 +83,11 @@ def _input_com_padrao(label: str, padrao: str = "") -> str:
     return input(f"   {label}: ").strip()
 
 
-def _so_digitos(texto: str) -> str:
-    return re.sub(r'\D', '', texto)
+def _pausar(msg: str = "Pressione ENTER para voltar ao menu...") -> None:
+    try:
+        input(f"\n   {msg}")
+    except EOFError:
+        pass
 
 
 def _tela_credenciais(config: dict) -> tuple[str, str, str]:
@@ -102,7 +109,7 @@ def _tela_credenciais(config: dict) -> tuple[str, str, str]:
     # Usuário
     usuario = ""
     while not usuario:
-        usuario = _so_digitos(
+        usuario = so_digitos(
             _input_com_padrao("Usuário (CPF)", config.get("usuario", ""))
         )
         if not usuario:
@@ -114,7 +121,7 @@ def _tela_credenciais(config: dict) -> tuple[str, str, str]:
         raw = _input_com_padrao(
             "CNPJ da entidade (14 dígitos)", config.get("cnpj_entidade", "")
         )
-        cnpj_entidade = _so_digitos(raw)
+        cnpj_entidade = so_digitos(raw)
         if len(cnpj_entidade) != 14:
             print(f"   CNPJ deve ter 14 dígitos (informado: {len(cnpj_entidade)}).\n")
 
@@ -145,7 +152,7 @@ def _tela_login_invalido(usuario: str) -> tuple[str, str]:
     print()
 
     novo_usuario_raw = _input_com_padrao("Usuário (CPF)", usuario).strip()
-    novo_usuario = _so_digitos(novo_usuario_raw) if novo_usuario_raw else usuario
+    novo_usuario = so_digitos(novo_usuario_raw) if novo_usuario_raw else usuario
 
     print()
     nova_senha = ""
@@ -160,6 +167,67 @@ def _tela_login_invalido(usuario: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Telas de navegação
 # ---------------------------------------------------------------------------
+
+def _tela_menu(sessao_ativa: bool, pendentes: int) -> str:
+    """Menu principal. Retorna '1', '2' ou '0'."""
+    _limpar_tela()
+    print(_cor("=" * 62, _AZUL))
+    print(_cor("   NOTA PARANÁ – DOAÇÃO AUTOMÁTICA", _NEGRITO))
+    print(_cor("=" * 62, _AZUL))
+    status = _cor("conectado", _VERDE) if sessao_ativa else "não iniciada"
+    print(f"   Sessão no portal : {status}")
+    if pendentes:
+        print(f"   Notas com erro   : {_cor(str(pendentes), _AMARELO)}"
+              " (serão relançadas ao sair)")
+    print(_cor("-" * 62, _AZUL))
+    print(f"   {_cor('1', _NEGRITO)}  Lançar notas")
+    print(f"   {_cor('2', _NEGRITO)}  Relatório do histórico de doações")
+    print(f"   {_cor('0', _NEGRITO)}  Sair")
+    print(_cor("=" * 62, _AZUL))
+    while True:
+        resp = input("\n   Sua escolha: ").strip()
+        if resp in ("1", "2", "0"):
+            return resp
+        print("   Digite 1, 2 ou 0.")
+
+
+def _ler_data(label: str, padrao: date) -> date:
+    while True:
+        raw = _input_com_padrao(f"{label} (dd/mm/aaaa)", f"{padrao:%d/%m/%Y}")
+        try:
+            return datetime.strptime(raw, "%d/%m/%Y").date()
+        except ValueError:
+            print("   Data inválida. Use o formato dd/mm/aaaa.\n")
+
+
+def _tela_relatorio() -> None:
+    _limpar_tela()
+    print(_cor("=" * 62, _AZUL))
+    print(_cor("   RELATÓRIO DO HISTÓRICO DE DOAÇÕES", _NEGRITO))
+    print(_cor("=" * 62, _AZUL))
+    print()
+
+    registros = historico.carregar()
+    if not registros:
+        print(_cor("   Nenhuma nota registrada neste computador até o momento.", _AMARELO))
+        _pausar()
+        return
+
+    primeira = min(r["_dt"] for r in registros).date()
+    print(f"   Histórico disponível desde {primeira:%d/%m/%Y}.")
+    print("   Informe o período (ENTER mantém o valor sugerido).\n")
+    inicio = _ler_data("Data inicial", primeira)
+    fim = _ler_data("Data final  ", date.today())
+    if fim < inicio:
+        inicio, fim = fim, inicio
+
+    destino = historico.gerar_relatorio(inicio, fim)
+    print()
+    print(_cor("   Relatório gerado e aberto no navegador.", _VERDE))
+    print(f"   Arquivo: {destino}")
+    print("   Para PDF: botão 'Imprimir / Salvar em PDF' no topo da página.")
+    _pausar()
+
 
 def _tela_confirmacao(chaves: list[str]) -> bool:
     _limpar_tela()
@@ -246,13 +314,13 @@ def _pedir_cnpj_valido(cnpj_invalido: str) -> str:
     novo = ""
     while len(novo) != 14:
         raw = _input_com_padrao("CNPJ correto da entidade (14 dígitos)", "")
-        novo = _so_digitos(raw)
+        novo = so_digitos(raw)
         if len(novo) != 14:
             print(f"   CNPJ deve ter 14 dígitos (informado: {len(novo)}).\n")
     return novo
 
 
-def _tela_limite_erros(n_erros: int, n_restantes: int) -> bool:
+def _tela_limite_erros(n_com_erro: int, n_restantes: int) -> bool:
     """
     Exibe aviso de muitos erros consecutivos e pergunta se deve continuar.
     Retorna True se o operador quiser continuar, False para encerrar.
@@ -262,15 +330,17 @@ def _tela_limite_erros(n_erros: int, n_restantes: int) -> bool:
     print(_cor(f"   {LIMITE_ERROS_CHAVE} ERROS CONSECUTIVOS – LOTE INTERROMPIDO",
                _AMARELO + _NEGRITO))
     print(_cor("=" * 62, _AMARELO))
-    print(f"\n   {n_erros} nota(s) com erro HTTP 400 seguidas.")
-    print(f"   {n_restantes} nota(s) restante(s) ainda não processada(s).")
+    print(f"\n   As últimas {LIMITE_ERROS_CHAVE} notas enviadas falharam em sequência.")
+    print(f"   {n_com_erro} nota(s) com erro neste lote.")
+    print(f"   {n_restantes} nota(s) ainda não processada(s).")
     print()
     print("   Possíveis causas:")
     print("   • Chaves de acesso inválidas ou já doadas anteriormente")
     print("   • Problema temporário no portal")
     print()
     print(_cor("-" * 62, _AMARELO))
-    print("   S = tentar as notas restantes  |  N = encerrar lançamento")
+    print(f"   S = tentar novamente essas {n_com_erro + n_restantes} nota(s)"
+          "  |  N = encerrar lançamento")
     print(_cor("=" * 62, _AMARELO))
     while True:
         resp = input("\n   Sua escolha [S/N]: ").strip().upper()
@@ -281,19 +351,28 @@ def _tela_limite_erros(n_erros: int, n_restantes: int) -> bool:
         print("   Por favor, digite S ou N.")
 
 
-def _perguntar_mais_notas() -> bool:
-    print()
-    print(_cor("-" * 62, _AZUL))
-    print("   Deseja lançar mais notas?")
-    print("   S = sim, continuar  |  N = não, encerrar")
-    print(_cor("-" * 62, _AZUL))
-    while True:
-        resp = input("\n   Sua escolha [S/N]: ").strip().upper()
-        if resp in ("S", "SIM"):
-            return True
-        if resp in ("N", "NAO", "NÃO", ""):
-            return False
-        print("   Por favor, digite S ou N.")
+# ---------------------------------------------------------------------------
+# Processamento de lote
+# ---------------------------------------------------------------------------
+
+def _acumular(anterior: dict | None, novo: dict) -> dict:
+    """Soma uma nova rodada ao resultado das anteriores do mesmo lote.
+
+    As chaves com erro da rodada anterior foram reenviadas na nova, então
+    para elas vale apenas o novo resultado; doadas e expiradas se somam.
+    """
+    if anterior is None:
+        return novo
+    expiradas = anterior["chaves_expiradas"] + novo["chaves_expiradas"]
+    ja_expiradas = set(anterior["chaves_expiradas"])
+    mensagens = [m for m in anterior["erros_com_mensagem"] if m[0] in ja_expiradas]
+    return {
+        **novo,
+        "sucesso": anterior["sucesso"] + novo["sucesso"],
+        "chaves_expiradas": expiradas,
+        "erros_com_mensagem": mensagens + novo["erros_com_mensagem"],
+        "erro": len(expiradas) + len(novo["chaves_com_erro"]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -310,37 +389,50 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # ── Lê configuração salva e solicita credenciais ─────────────────────────
     config = _carregar_config()
-    usuario, cnpj_entidade, senha = _tela_credenciais(config)
-
-    # Salva usuário e CNPJ (nunca a senha)
-    config["usuario"]       = usuario
-    config["cnpj_entidade"] = cnpj_entidade
-    _salvar_config(config)
+    usuario = cnpj_entidade = senha = None
 
     pw = browser = page = None
     houve_erro_geral = False
     cnpj_verificado  = False
     todas_chaves_erro: list[str] = []   # acumula erros de todos os lotes
 
+    def relogin() -> None:
+        fazer_login_portal(page, usuario, senha)
+
+    def registrar(chave: str, status: str, msg: str) -> None:
+        historico.registrar(chave, status, cnpj_entidade, msg)
+
     try:
         while True:
+            opcao = _tela_menu(pw is not None, len(set(todas_chaves_erro)))
+            if opcao == "0":
+                break
+            if opcao == "2":
+                _tela_relatorio()
+                continue
+
+            # ── Credenciais (apenas no primeiro lançamento) ───────────────
+            if senha is None:
+                usuario, cnpj_entidade, senha = _tela_credenciais(config)
+                # Salva usuário e CNPJ (nunca a senha)
+                config["usuario"]       = usuario
+                config["cnpj_entidade"] = cnpj_entidade
+                _salvar_config(config)
+
             # ── Coleta ────────────────────────────────────────────────────
-            chaves = coletar_qr_codes()
+            chaves = coletar_qr_codes(historico.chaves_ja_processadas())
 
             if not chaves:
                 _limpar_tela()
                 print(_cor("   Nenhuma nota registrada.", _AMARELO))
-                if pw is None or not _perguntar_mais_notas():
-                    break
+                _pausar()
                 continue
 
             # ── Confirmação ───────────────────────────────────────────────
             if not _tela_confirmacao(chaves):
                 print("\n   Lote cancelado pelo operador.")
-                if pw is None or not _perguntar_mais_notas():
-                    break
+                _pausar()
                 continue
 
             # ── Abre navegador (apenas no primeiro lançamento) ────────────
@@ -361,34 +453,35 @@ def main() -> None:
             # ── Doação (com retry em caso de CNPJ inválido ou limite de erros) ─
             _tela_processando(len(chaves))
             chaves_lote = list(chaves)
+            resultado = None
 
             while True:
-                resultado = doar_lote(
+                rodada = doar_lote(
                     page, cnpj_entidade, chaves_lote,
                     verificar_cnpj=not cnpj_verificado,
+                    relogin=relogin, ao_registrar=registrar,
                 )
+                resultado = _acumular(resultado, rodada)
 
                 # CNPJ rejeitado → pede novo CNPJ e reprocessa as mesmas chaves
-                if resultado.get("cnpj_invalido"):
+                if rodada.get("cnpj_invalido"):
                     cnpj_entidade = _pedir_cnpj_valido(cnpj_entidade)
                     config["cnpj_entidade"] = cnpj_entidade
                     _salvar_config(config)
-                    chaves_lote = resultado["chaves_com_erro"]
+                    chaves_lote = rodada["chaves_com_erro"]
                     _tela_processando(len(chaves_lote))
                     continue
 
                 # Muitos erros seguidos → pergunta ao operador se continua
-                if resultado.get("parou_por_limite_erros"):
-                    n_restantes = len(resultado["chaves_com_erro"])
-                    continuar = _tela_limite_erros(resultado["erro"], n_restantes)
-                    if continuar:
-                        chaves_lote = resultado["chaves_com_erro"]
+                if rodada.get("parou_por_limite_erros"):
+                    n_restantes = rodada["nao_processadas"]
+                    n_com_erro  = len(rodada["chaves_com_erro"]) - n_restantes
+                    if _tela_limite_erros(n_com_erro, n_restantes):
+                        chaves_lote = rodada["chaves_com_erro"]
                         cnpj_verificado = True
                         _tela_processando(len(chaves_lote))
                         continue
-                    else:
-                        # Operador optou por não continuar
-                        break
+                    break   # operador optou por não continuar
 
                 cnpj_verificado = True
                 break
@@ -405,13 +498,16 @@ def main() -> None:
                 houve_erro_geral = True
                 todas_chaves_erro.extend(resultado["chaves_com_erro"])
 
-            if not _perguntar_mais_notas():
-                break
+            _pausar()
 
         # ── Retry automático das notas com erro ──────────────────────────────
-        # Remove duplicatas preservando a ordem
-        chaves_retry = list(dict.fromkeys(todas_chaves_erro))
-        if chaves_retry and pw is not None:
+        # Remove duplicatas preservando a ordem e ignora as que já foram
+        # resolvidas em um lote posterior (constam no histórico).
+        resolvidas = historico.chaves_ja_processadas()
+        chaves_retry = [c for c in dict.fromkeys(todas_chaves_erro) if c not in resolvidas]
+        if not chaves_retry:
+            houve_erro_geral = False
+        elif pw is not None:
             _limpar_tela()
             print(_cor("=" * 62, _AZUL))
             print(_cor("   RELANÇANDO NOTAS COM ERRO", _NEGRITO))
@@ -420,14 +516,15 @@ def main() -> None:
 
             _tela_processando(len(chaves_retry))
             resultado_retry = doar_lote(
-                page, cnpj_entidade, chaves_retry, verificar_cnpj=False
+                page, cnpj_entidade, chaves_retry, verificar_cnpj=not cnpj_verificado,
+                relogin=relogin, ao_registrar=registrar,
             )
             _tela_resultado(
                 resultado_retry["sucesso"],
                 resultado_retry["erro"],
                 resultado_retry["erros_com_mensagem"],
             )
-            if resultado_retry["erro"] == 0:
+            if not resultado_retry["chaves_com_erro"]:
                 houve_erro_geral = False   # todos os erros foram recuperados
 
     finally:

@@ -29,6 +29,9 @@ logs/
 *.log
 chaves_coletadas.json
 resultado_doacao.json
+historico_doacoes.csv
+relatorios/
+inicia.bat.novo
 
 # Editor
 .vscode/

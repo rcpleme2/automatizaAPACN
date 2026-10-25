@@ -2,24 +2,27 @@
 
 Sistema de coleta de notas fiscais do Paraná via leitor de QR code/código de barras e envio automático para doação no portal **Nota Paraná**.
 
-Inicializar sempre pelo arquivo inicia.bat
+Inicializar sempre pelo arquivo inicia.bat — ele também verifica se há versão nova no GitHub e atualiza o programa com um único **S**.
 
 
 ## Visão geral do fluxo
 
 ```
-[ Credenciais ] ──▶ [ Leitor QR/Barcode ] ──▶ [ Confirmação ] ──▶ [ Playwright → Nota Paraná ]
+[ Atualização ] ──▶ [ Menu ] ──▶ [ Credenciais ] ──▶ [ Leitor QR/Barcode ] ──▶ [ Confirmação ] ──▶ [ Playwright → Nota Paraná ] ──▶ [ Histórico ]
+                       └──▶ [ Relatório do histórico (HTML / PDF) ]
 ```
 
-1. **Credenciais** – O programa solicita CPF, CNPJ da entidade e senha. CPF e CNPJ são salvos localmente para a próxima execução; a senha nunca é salva.
-2. **Coleta** – O operador passa o leitor USB nos QR codes/códigos de barras das notas. Cada chave é validada em tempo real.
+0. **Menu** – `1` lança notas, `2` gera o relatório do histórico, `0` sai.
+1. **Credenciais** – No primeiro lançamento o programa solicita CPF, CNPJ da entidade e senha. CPF e CNPJ são salvos localmente para a próxima execução; a senha nunca é salva.
+2. **Coleta** – O operador passa o leitor USB nos QR codes/códigos de barras das notas. Cada chave é validada em tempo real, e notas que já constam no histórico deste computador são recusadas na leitura.
 3. **Confirmação** – O operador revisa a lista antes de prosseguir.
 4. **Doação automática** – O script abre o navegador, faz login no portal e processa cada nota:
    - **1ª doação:** preenche o CNPJ da entidade, aguarda a verificação automática do portal (HTTP 200 = ok, HTTP 400 = CNPJ inválido) e, se válido, lança a nota.
    - **Demais doações:** o CNPJ já está preenchido; o script vai direto ao preenchimento da chave e ao clique no botão de doação.
    - Cada doação aguarda a confirmação do portal (`_mensagem: "Documento fiscal doado com sucesso!"`) antes de avançar para a próxima.
-5. **Resultado** – Aviso visual informa quantas notas foram doadas com sucesso e quais tiveram erro.
-6. **Mais notas?** – O operador pode lançar novos lotes sem precisar refazer o login.
+   - Se a sessão do portal expirar no meio do lote, o login é refeito automaticamente e a nota é tentada de novo.
+5. **Resultado** – Aviso visual informa quantas notas foram doadas com sucesso e quais tiveram erro. Cada nota doada (ou recusada por prazo) é gravada no histórico local na hora.
+6. **Volta ao menu** – O operador pode lançar novos lotes sem precisar refazer o login. Ao sair, as notas com erro são relançadas automaticamente uma vez.
 
 ---
 
@@ -44,6 +47,8 @@ playwright install chromium
 
 **4. Executar**
 
+Dê dois cliques em `inicia.bat` (recomendado) ou, no terminal:
+
 ```bash
 python main.py
 ```
@@ -58,15 +63,43 @@ python main.py --headless
 
 ## Como usar o programa
 
-1. Execute `python main.py`.
-2. Informe o **CPF**, o **CNPJ da entidade** e a **senha** do portal Nota Paraná.
+1. Execute `inicia.bat`. Se houver versão nova, confirme com **S** (ou ENTER).
+2. No menu, escolha **1 – Lançar notas**.
+3. Informe o **CPF**, o **CNPJ da entidade** e a **senha** do portal Nota Paraná.
    - CPF e CNPJ são pré-preenchidos com os valores da última execução — pressione ENTER para manter.
-   - A senha não é exibida durante a digitação e **nunca é salva**.
-3. Aponte o leitor USB para o QR code ou código de barras de cada nota — ele lê e registra automaticamente.
-4. Para **encerrar a coleta**: leia um código com o texto `FIM`, ou pressione **ENTER** com o campo vazio.
-5. Revise a lista exibida e confirme digitando **S** + ENTER.
-6. Aguarde o envio automático. Ao final, um aviso mostra quantas notas foram doadas.
-7. Escolha **S** para lançar mais notas (sem refazer login) ou **N** para encerrar.
+   - A senha **aparece na tela** durante a digitação (para evitar erros de digitação), mas **nunca é salva**.
+4. Aponte o leitor USB para o QR code ou código de barras de cada nota — ele lê e registra automaticamente.
+5. Para **encerrar a coleta**: leia um código com o texto `FIM`, ou pressione **ENTER** com o campo vazio.
+6. Revise a lista exibida e confirme digitando **S** + ENTER.
+7. Aguarde o envio automático. Ao final, um aviso mostra quantas notas foram doadas.
+8. Pressione ENTER para voltar ao menu: **1** lança mais notas (sem refazer login), **0** encerra.
+
+---
+
+## Histórico e relatório
+
+Toda nota **doada** ou **recusada por prazo expirado** é gravada em `historico_doacoes.csv`
+(pode ser aberto no Excel) no momento em que o portal confirma o resultado.
+
+No menu, a opção **2 – Relatório do histórico** pede o período (data inicial e final) e gera
+um HTML em `relatorios/`, que abre automaticamente no navegador. O botão
+**Imprimir / Salvar em PDF** exporta o documento.
+
+> O relatório deixa claro que se refere **apenas às notas processadas naquele computador**
+> no período informado. Doações feitas em outro computador ou direto no portal não aparecem.
+
+---
+
+## Atualização automática
+
+O `inicia.bat` executa `atualizador.py` antes do programa:
+
+1. Baixa a versão do branch `main` do GitHub e compara com os arquivos locais.
+2. Havendo diferença, mostra a última alteração e os arquivos afetados e pergunta **Atualizar agora? [S/n]**.
+3. Atualiza os arquivos do programa; se o `requirements.txt` mudou, reinstala as dependências.
+4. `config.json`, `historico_doacoes.csv`, `relatorios/` e `venv/` **nunca são alterados**.
+
+Sem internet, a verificação é ignorada e o programa segue normalmente.
 
 ---
 
@@ -112,22 +145,27 @@ A chave pode ser fornecida com espaços ou hífens entre grupos — o sistema no
 
 ```
 automatizaAPACN/
-├── main.py              # Ponto de entrada – orquestra o fluxo completo
+├── inicia.bat           # Inicializador (ambiente virtual + atualização + programa)
+├── atualizador.py       # Verifica e aplica versão nova do GitHub
+├── main.py              # Ponto de entrada – menu e fluxo completo
 ├── qr_collector.py      # Coleta via leitor HID + validação de chaves
 ├── notaparana_bot.py    # Automação Playwright do portal Nota Paraná
+├── historico.py         # Histórico local e relatório HTML
 ├── requirements.txt     # Dependências Python
 ├── config.json          # CPF e CNPJ salvos entre execuções (gerado automaticamente)
+├── historico_doacoes.csv  # Histórico das notas processadas neste computador (gerado)
+├── relatorios/          # Relatórios HTML gerados
 ├── .gitignore
 └── README.md
 ```
 
-> `config.json` é gerado automaticamente na primeira execução e está no `.gitignore`.
+> `config.json`, `historico_doacoes.csv` e `relatorios/` são gerados automaticamente e estão no `.gitignore`.
 
 ---
 
 ## Segurança
 
-- **Senha nunca é salva** — solicitada a cada execução via `getpass`.
+- **Senha nunca é salva** — solicitada a cada execução (fica visível durante a digitação).
 - CPF e CNPJ da entidade são salvos em `config.json` apenas para conveniência do operador.
 - O `config.json` está no `.gitignore` e não deve ser versionado.
 - O script não grava credenciais em logs ou arquivos de saída.

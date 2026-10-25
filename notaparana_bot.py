@@ -10,6 +10,7 @@ Nenhum dado sensível é lido de arquivo neste módulo.
 import json
 import logging
 import re
+from typing import Callable, Optional
 from urllib.parse import urlparse, parse_qs, unquote
 
 from playwright.sync_api import (
@@ -35,6 +36,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 URL_LOGIN_DIRETO = "https://notaparana.pr.gov.br/"
 URL_SAIR         = "https://notaparana.pr.gov.br/nfprweb/publico/sair"
+URL_FORM_DOACAO  = "https://notaparana.pr.gov.br/nfprweb/DoacaoDocumentoFiscalCadastrar"
 TIMEOUT_PADRAO      = 30_000   # ms
 TIMEOUT_CURTO       =  5_000   # ms
 TIMEOUT_COOKIE      =    500   # ms – falha rápida na checagem de popup de cookies
@@ -79,7 +81,7 @@ _SEL_CHAVE = (
 # Funções auxiliares
 # ---------------------------------------------------------------------------
 
-def _so_digitos(texto: str) -> str:
+def so_digitos(texto: str) -> str:
     return re.sub(r'\D', '', texto)
 
 
@@ -277,8 +279,53 @@ def _navegar_para_doacoes(page: Page) -> None:
     page.locator(_SEL_CNPJ).first.wait_for(state="visible", timeout=TIMEOUT_PADRAO)
 
 
+def _sessao_expirada(page: Page) -> bool:
+    """True se a página atual é a tela de login (sessão encerrada pelo portal)."""
+    try:
+        return page.locator("#attribute").first.is_visible()
+    except Exception:
+        return False
+
+
+def _formulario_visivel(page: Page) -> bool:
+    try:
+        return page.locator(_SEL_CNPJ).first.is_visible()
+    except Exception:
+        return False
+
+
+def _restaurar_formulario(page: Page, relogin: Callable[[], None]) -> bool:
+    """Volta ao formulário de doação, refazendo o login se a sessão caiu.
+
+    Retorna True se o formulário ficou disponível (o CNPJ precisa ser
+    preenchido novamente, pois a página foi recarregada).
+    """
+    log.warning("  Formulário de doação indisponível. Verificando a sessão...")
+    try:
+        page.goto(URL_FORM_DOACAO, wait_until="domcontentloaded")
+        if _esta_no_formulario_doacao(page):
+            return True
+        if _sessao_expirada(page):
+            log.warning("  Sessão expirada. Refazendo login...")
+            relogin()
+        else:
+            try:
+                _navegar_para_doacoes(page)
+                return True
+            except PlaywrightTimeout:
+                log.warning("  Menu de doações indisponível. Refazendo login...")
+                relogin()
+        _navegar_para_doacoes(page)
+        log.info("  Sessão restaurada.")
+        return True
+    except Exception as exc:
+        log.error(f"  Não foi possível restaurar a sessão: {exc}")
+        return False
+
+
 def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
-                numero: int, total: int, verificar_cnpj: bool = True) -> bool:
+                numero: int, total: int,
+                verificar_cnpj: bool = True) -> tuple[bool, str]:
     """Preenche e submete o formulário de doação para uma única chave.
 
     verificar_cnpj=True  → preenche o CNPJ, aciona a verificação automática do
@@ -293,7 +340,9 @@ def _doar_chave(page: Page, cnpj_entidade: str, chave: str,
     Raises:
         CNPJInvalidoError: se a verificação do CNPJ retornar HTTP 400.
     """
-    log.info(f"Doando chave {numero}/{total}: {chave[:10]}...")
+    # nNF (posições 26–34) é o número impresso no cupom; os 10 primeiros
+    # dígitos se repetem entre notas da mesma loja e não ajudam a identificar.
+    log.info(f"Doando chave {numero}/{total}: nota nº {chave[25:34].lstrip('0')} (…{chave[-8:]})")
 
     try:
         # ── 1. Preenche o CNPJ e aguarda a verificação automática ─────────
@@ -415,23 +464,14 @@ def fazer_login_portal(page: Page, usuario: str, senha: str) -> None:
     Raises:
         CredenciaisInvalidasError: se usuário ou senha estiverem incorretos.
     """
-    _fazer_login(page, _so_digitos(usuario), senha)
+    _fazer_login(page, so_digitos(usuario), senha)
     _fechar_modal_contato(page)
 
 
-def iniciar_sessao(usuario: str, senha: str, headless: bool = False) -> tuple[Playwright, Browser, Page]:
-    """Abre o navegador, faz login e retorna (pw, browser, page).
-
-    Raises:
-        CredenciaisInvalidasError: se usuário ou senha estiverem incorretos.
-    """
-    pw, browser, page = abrir_navegador(headless)
-    fazer_login_portal(page, usuario, senha)
-    return pw, browser, page
-
-
 def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
-              verificar_cnpj: bool = True) -> dict:
+              verificar_cnpj: bool = True,
+              relogin: Optional[Callable[[], None]] = None,
+              ao_registrar: Optional[Callable[[str, str, str], None]] = None) -> dict:
     """
     Processa um lote de chaves de acesso.
 
@@ -441,13 +481,19 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
     doação expirado) não contam para esse limite e não entram em
     'chaves_com_erro' (lista usada para relançamento).
 
+    relogin       → chamado se a sessão expirar no meio do lote; a chave que
+                    falhou é tentada mais uma vez após o novo login.
+    ao_registrar  → chamado com (chave, "doada" | "fora_do_prazo", mensagem)
+                    assim que o resultado de cada nota é definitivo.
+
     Returns:
         {
             "sucesso":                int,
             "erro":                   int,
-            "chaves_com_erro":        list[str],
+            "chaves_com_erro":        list[str],   # falhas + não processadas
             "erros_com_mensagem":     list[tuple[str, str]],  # (chave, msg_erro)
             "chaves_expiradas":       list[str],
+            "nao_processadas":        int,
             "cnpj_invalido":          bool,
             "parou_por_limite_erros": bool,
         }
@@ -458,6 +504,7 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
         "chaves_com_erro": [],
         "erros_com_mensagem": [],
         "chaves_expiradas": [],
+        "nao_processadas": 0,
         "cnpj_invalido": False,
         "parou_por_limite_erros": False,
     }
@@ -471,12 +518,20 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
         _navegar_para_doacoes(page)
 
     erros_consecutivos = 0
+    preencher_cnpj = verificar_cnpj
 
     for idx, chave in enumerate(chaves, start=1):
-        checar = verificar_cnpj and idx == 1
         try:
             sucesso, msg_erro = _doar_chave(page, cnpj_entidade, chave, idx, len(chaves),
-                                            verificar_cnpj=checar)
+                                            verificar_cnpj=preencher_cnpj)
+            preencher_cnpj = False
+
+            # Sessão caiu no meio do lote → novo login e uma nova tentativa
+            if (not sucesso and not _is_erro_documento(msg_erro)
+                    and relogin is not None and not _formulario_visivel(page)
+                    and _restaurar_formulario(page, relogin)):
+                sucesso, msg_erro = _doar_chave(page, cnpj_entidade, chave, idx, len(chaves),
+                                                verificar_cnpj=True)
         except CNPJInvalidoError as exc:
             log.error(str(exc))
             resultado["cnpj_invalido"] = True
@@ -490,11 +545,15 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
         if sucesso:
             resultado["sucesso"] += 1
             erros_consecutivos = 0
+            if ao_registrar:
+                ao_registrar(chave, "doada", "")
         elif _is_erro_documento(msg_erro):
             # Problema da nota, não da execução: registra e segue sem relançar.
             resultado["erro"] += 1
             resultado["chaves_expiradas"].append(chave)
             resultado["erros_com_mensagem"].append((chave, msg_erro))
+            if ao_registrar:
+                ao_registrar(chave, "fora_do_prazo", msg_erro)
         else:
             resultado["erro"] += 1
             resultado["chaves_com_erro"].append(chave)
@@ -511,6 +570,7 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
                 for c in chaves[idx:]:
                     resultado["chaves_com_erro"].append(c)
                     resultado["erros_com_mensagem"].append((c, msg_nao_proc))
+                resultado["nao_processadas"] = len(chaves) - idx
                 resultado["erro"] += len(chaves) - idx
                 break
 

@@ -44,6 +44,12 @@ TIMEOUT_NAVEGACAO   = 20_000   # ms – aguarda redirecionamento após clicar em
 # Número máximo de erros 400 consecutivos antes de pausar e perguntar ao operador
 LIMITE_ERROS_CHAVE = 5
 
+# Rejeições ligadas ao próprio documento (ex.: nota fora do prazo de doação).
+# São resultados normais: não contam para LIMITE_ERROS_CHAVE e não são relançadas.
+_PADROES_ERRO_DOCUMENTO = (
+    re.compile(r"prazo para doar esta nota expirou", re.IGNORECASE),
+)
+
 
 # ---------------------------------------------------------------------------
 # Exceções públicas
@@ -91,6 +97,11 @@ def _is_doacao_post(response) -> bool:
         response.request.resource_type in ("xhr", "fetch")
         and "documentoFiscalDoadoWeb" in response.url
     )
+
+
+def _is_erro_documento(msg_erro: str) -> bool:
+    """True se a rejeição se refere ao documento em si (ex.: prazo expirado)."""
+    return any(p.search(msg_erro) for p in _PADROES_ERRO_DOCUMENTO)
 
 
 def _extrair_params_url(url: str) -> dict:
@@ -426,7 +437,9 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
 
     Para após LIMITE_ERROS_CHAVE erros consecutivos de HTTP 400, definindo
     'parou_por_limite_erros': True no resultado para que o chamador decida
-    se continua ou encerra.
+    se continua ou encerra. Rejeições do próprio documento (ex.: prazo de
+    doação expirado) não contam para esse limite e não entram em
+    'chaves_com_erro' (lista usada para relançamento).
 
     Returns:
         {
@@ -434,6 +447,7 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
             "erro":                   int,
             "chaves_com_erro":        list[str],
             "erros_com_mensagem":     list[tuple[str, str]],  # (chave, msg_erro)
+            "chaves_expiradas":       list[str],
             "cnpj_invalido":          bool,
             "parou_por_limite_erros": bool,
         }
@@ -443,6 +457,7 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
         "erro": 0,
         "chaves_com_erro": [],
         "erros_com_mensagem": [],
+        "chaves_expiradas": [],
         "cnpj_invalido": False,
         "parou_por_limite_erros": False,
     }
@@ -475,6 +490,11 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
         if sucesso:
             resultado["sucesso"] += 1
             erros_consecutivos = 0
+        elif _is_erro_documento(msg_erro):
+            # Problema da nota, não da execução: registra e segue sem relançar.
+            resultado["erro"] += 1
+            resultado["chaves_expiradas"].append(chave)
+            resultado["erros_com_mensagem"].append((chave, msg_erro))
         else:
             resultado["erro"] += 1
             resultado["chaves_com_erro"].append(chave)

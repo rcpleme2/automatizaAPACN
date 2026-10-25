@@ -400,7 +400,8 @@ def main() -> None:
                 resultado["erros_com_mensagem"],
             )
 
-            if resultado["erro"] > 0:
+            # Notas fora do prazo não entram aqui: não há o que relançar.
+            if resultado["chaves_com_erro"]:
                 houve_erro_geral = True
                 todas_chaves_erro.extend(resultado["chaves_com_erro"])
 

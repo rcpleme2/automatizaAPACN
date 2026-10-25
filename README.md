@@ -90,6 +90,7 @@ Após clicar no botão **DOAR DOCUMENTOS** (`#btnDoarDocumento`), o script inter
 
 - **HTTP 200** + `_mensagem: "Documento fiscal doado com sucesso!"` → nota contabilizada como doada.
 - Qualquer outra resposta → nota registrada como erro e incluída na lista de chaves com falha.
+- **Nota fora do prazo** (`O prazo para doar esta nota expirou`) → aparece no resultado, mas não conta para o limite de 5 erros consecutivos e não é relançada.
 
 ---
 

@@ -4,23 +4,21 @@ atualizador.py
 Verifica se há versão nova do programa no branch main do GitHub e, havendo,
 atualiza os arquivos com um único "S" do operador.
 
-Chamado pelo inicia.bat antes do programa principal. Usa apenas a biblioteca
-padrão do Python (funciona mesmo antes de o ambiente virtual existir).
+Chamado pelo próprio main.py ao iniciar (não depende do inicia.bat). Usa
+apenas a biblioteca padrão do Python.
 
 - Compara os arquivos do ZIP do main com os locais (ignorando CRLF/LF).
 - Só sobrescreve arquivos que fazem parte do repositório: config.json,
-  historico_doacoes.csv, relatorios/ e venv/ nunca são tocados.
-- O próprio inicia.bat não é sobrescrito enquanto roda: é salvo como
-  inicia.bat.novo e trocado pelo inicia.bat após esta etapa.
+  historico_doacoes.csv, relatorios/, logs/ e venv/ nunca são tocados.
+- O inicia.bat não é atualizado: o Windows lê o .bat linha a linha enquanto
+  ele roda, e trocá-lo no meio da execução faria o console executar lixo.
+- Se o requirements.txt mudar, reinstala as dependências no Python atual.
 - Sem internet ou com qualquer falha, segue com a versão atual.
-
-Códigos de saída (lidos pelo inicia.bat):
-    0 = nada a fazer      2 = atualizado, reinstalar dependências
-    1 = atualizado        (falhas também saem com 0)
 """
 
 import io
 import json
+import subprocess
 import sys
 import urllib.request
 import zipfile
@@ -33,8 +31,7 @@ URL_COMMIT = f"https://api.github.com/repos/{REPO}/commits/{BRANCH}"
 TIMEOUT = 8  # segundos
 
 _PASTA = Path(__file__).parent
-# Arquivos do repositório que não fazem sentido no computador do operador
-_IGNORAR = {".gitignore"}
+_IGNORAR = {".gitignore", "inicia.bat"}
 
 
 def _baixar(url: str) -> bytes:
@@ -85,19 +82,29 @@ def _descricao_ultima_versao() -> str:
         return ""
 
 
-def main() -> int:
+def _instalar_dependencias() -> None:
+    print("   Atualizando dependências (pode levar alguns minutos)...")
+    requisitos = str(_PASTA / "requirements.txt")
+    subprocess.call([sys.executable, "-m", "pip", "install", "-q", "-r", requisitos])
+    subprocess.call([sys.executable, "-m", "playwright", "install", "chromium"])
+
+
+def verificar_e_atualizar() -> bool:
+    """Verifica e, com a confirmação do operador, aplica a versão nova.
+
+    Retorna True se arquivos foram atualizados (o programa deve reiniciar).
+    """
     print("   Verificando atualizações...")
     try:
         remotos = _arquivos_remotos(_baixar(URL_ZIP))
     except Exception as exc:
         print(f"   Não foi possível verificar atualizações ({exc.__class__.__name__}). "
               "Seguindo com a versão atual.")
-        return 0
+        return False
 
     alterados = _alterados(remotos)
     if not alterados:
-        print("   Programa já está na versão mais recente.")
-        return 0
+        return False
 
     print()
     print("   ==================================================")
@@ -110,29 +117,30 @@ def main() -> int:
     for nome in alterados:
         print(f"     • {nome}")
     print()
-    print("   Seus dados (config, histórico e relatórios) são preservados.")
+    print("   Seus dados (config, histórico, relatórios e logs) são preservados.")
     try:
         resp = input("   Atualizar agora? [S/n]: ").strip().upper()
     except EOFError:
         resp = "N"
     if resp not in ("", "S", "SIM"):
         print("   Atualização adiada.")
-        return 0
+        return False
 
     try:
         for relativo in alterados:
             destino = _PASTA / relativo
-            if relativo == "inicia.bat":
-                destino = _PASTA / "inicia.bat.novo"
             destino.parent.mkdir(parents=True, exist_ok=True)
             destino.write_bytes(remotos[relativo])
     except Exception as exc:
         print(f"   Falha ao gravar arquivos ({exc}). Seguindo com a versão atual.")
-        return 0
+        return False
 
-    print("   Atualização concluída.")
-    return 2 if "requirements.txt" in alterados else 1
+    if "requirements.txt" in alterados:
+        _instalar_dependencias()
+
+    print("   Atualização concluída. Reiniciando o programa...")
+    return True
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    verificar_e_atualizar()

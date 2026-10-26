@@ -22,13 +22,8 @@ from playwright.sync_api import (
 )
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging (destino configurado pelo chamador; ver painel.configurar_log)
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -471,7 +466,7 @@ def fazer_login_portal(page: Page, usuario: str, senha: str) -> None:
 def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
               verificar_cnpj: bool = True,
               relogin: Optional[Callable[[], None]] = None,
-              ao_registrar: Optional[Callable[[str, str, str], None]] = None) -> dict:
+              ao_progresso: Optional[Callable[[str, str, str], None]] = None) -> dict:
     """
     Processa um lote de chaves de acesso.
 
@@ -483,8 +478,9 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
 
     relogin       → chamado se a sessão expirar no meio do lote; a chave que
                     falhou é tentada mais uma vez após o novo login.
-    ao_registrar  → chamado com (chave, "doada" | "fora_do_prazo", mensagem)
-                    assim que o resultado de cada nota é definitivo.
+    ao_progresso  → chamado com (chave, status, mensagem) ao iniciar cada nota
+                    ("enviando") e ao obter o resultado ("doada",
+                    "fora_do_prazo" ou "erro").
 
     Returns:
         {
@@ -519,8 +515,10 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
 
     erros_consecutivos = 0
     preencher_cnpj = verificar_cnpj
+    avisar = ao_progresso or (lambda *_: None)
 
     for idx, chave in enumerate(chaves, start=1):
+        avisar(chave, "enviando", "")
         try:
             sucesso, msg_erro = _doar_chave(page, cnpj_entidade, chave, idx, len(chaves),
                                             verificar_cnpj=preencher_cnpj)
@@ -545,19 +543,18 @@ def doar_lote(page: Page, cnpj_entidade: str, chaves: list[str],
         if sucesso:
             resultado["sucesso"] += 1
             erros_consecutivos = 0
-            if ao_registrar:
-                ao_registrar(chave, "doada", "")
+            avisar(chave, "doada", "")
         elif _is_erro_documento(msg_erro):
             # Problema da nota, não da execução: registra e segue sem relançar.
             resultado["erro"] += 1
             resultado["chaves_expiradas"].append(chave)
             resultado["erros_com_mensagem"].append((chave, msg_erro))
-            if ao_registrar:
-                ao_registrar(chave, "fora_do_prazo", msg_erro)
+            avisar(chave, "fora_do_prazo", msg_erro)
         else:
             resultado["erro"] += 1
             resultado["chaves_com_erro"].append(chave)
             resultado["erros_com_mensagem"].append((chave, msg_erro))
+            avisar(chave, "erro", msg_erro)
             erros_consecutivos += 1
 
             if erros_consecutivos >= LIMITE_ERROS_CHAVE:

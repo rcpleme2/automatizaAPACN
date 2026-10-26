@@ -22,17 +22,24 @@ Fluxo:
   4. Ao sair, tenta automaticamente relançar todas as notas com erro,
      faz logout no site e encerra o navegador.
 
+Ao iniciar, verifica se há versão nova no GitHub (atualizador.py) e, se o
+operador aceitar, atualiza os arquivos e reinicia sozinho.
+
 Uso:
-    python main.py [--headless]
+    python main.py [--headless] [--sem-atualizar]
 """
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
 
 import historico
+from atualizador import verificar_e_atualizar
+from painel import PainelEnvio, configurar_log, preparar_console
 from qr_collector import coletar_qr_codes, _fmt as fmt_chave, _cor, \
     _VERDE, _VERMELHO, _AMARELO, _AZUL, _NEGRITO, _limpar_tela
 from notaparana_bot import (
@@ -250,54 +257,46 @@ def _tela_confirmacao(chaves: list[str]) -> bool:
         print("   Por favor, digite S ou N.")
 
 
-def _tela_processando(total: int) -> None:
+def _tela_resultado(resultado: dict) -> None:
+    """Resumo do lote: notas fora do prazo (informativo) separadas dos erros."""
     _limpar_tela()
-    print(_cor("=" * 62, _AZUL))
-    print(_cor("   ENVIANDO DOAÇÕES...", _NEGRITO))
-    print(_cor("=" * 62, _AZUL))
-    print(f"\n   Aguarde. Processando {total} nota(s)...")
-    print("   Não feche esta janela.\n")
+    doadas = resultado["sucesso"]
+    expiradas = resultado["chaves_expiradas"]
+    set_expiradas = set(expiradas)
+    erros = [(c, m) for c, m in resultado["erros_com_mensagem"] if c not in set_expiradas]
 
-
-def _tela_resultado(sucesso: int, erros: int,
-                    erros_com_mensagem: list[tuple[str, str]]) -> None:
-    _limpar_tela()
-
-    if erros == 0:
-        borda  = _cor("=" * 62, _VERDE)
-        titulo = _cor("   ✔  DOAÇÃO CONCLUÍDA COM SUCESSO!", _VERDE + _NEGRITO)
-        print(borda)
-        print(titulo)
-        print(borda)
-        print(f"\n   {_cor(str(sucesso), _VERDE + _NEGRITO)} nota(s) doadas com sucesso.\n")
-        print(borda)
-
-    elif sucesso == 0:
-        borda  = _cor("=" * 62, _VERMELHO)
-        titulo = _cor("   ✘  NENHUMA DOAÇÃO FOI REALIZADA", _VERMELHO + _NEGRITO)
-        print(borda)
-        print(titulo)
-        print(borda)
-        print(f"\n   {_cor(str(erros), _VERMELHO + _NEGRITO)} nota(s) com erro:\n")
-        for chave, msg in erros_com_mensagem:
-            print(f"      •  {fmt_chave(chave)}")
-            print(f"         {_cor(msg, _VERMELHO)}")
-        print()
-        print(borda)
-
+    if erros and doadas:
+        cor, titulo = _AMARELO, "⚠  DOAÇÃO PARCIALMENTE CONCLUÍDA"
+    elif erros:
+        cor, titulo = _VERMELHO, "✘  NENHUMA DOAÇÃO FOI REALIZADA"
+    elif doadas:
+        cor, titulo = _VERDE, "✔  DOAÇÃO CONCLUÍDA COM SUCESSO!"
     else:
-        borda  = _cor("=" * 62, _AMARELO)
-        titulo = _cor("   ⚠  DOAÇÃO PARCIALMENTE CONCLUÍDA", _AMARELO + _NEGRITO)
-        print(borda)
-        print(titulo)
-        print(borda)
-        print(f"\n   {_cor(str(sucesso), _VERDE + _NEGRITO)} nota(s) doadas com sucesso.")
-        print(f"   {_cor(str(erros),    _VERMELHO + _NEGRITO)} nota(s) com erro:\n")
-        for chave, msg in erros_com_mensagem:
-            print(f"      •  {fmt_chave(chave)}")
+        cor, titulo = _AMARELO, "⏱  NENHUMA NOTA DENTRO DO PRAZO"
+
+    borda = _cor("=" * 62, cor)
+    print(borda)
+    print(_cor(f"   {titulo}", cor + _NEGRITO))
+    print(borda)
+    print()
+    print(f"   {_cor(f'✔ {doadas:>4}', _VERDE + _NEGRITO)}  nota(s) doada(s)")
+    print(f"   {_cor(f'⏱ {len(expiradas):>4}', _AMARELO + _NEGRITO)}  fora do prazo"
+          " (normal, não serão relançadas)")
+    print(f"   {_cor(f'✘ {len(erros):>4}', _VERMELHO + _NEGRITO)}  com erro"
+          + (" (serão relançadas ao sair)" if erros else ""))
+
+    if expiradas:
+        print(_cor("\n   Fora do prazo:", _AMARELO))
+        for chave in expiradas:
+            print(f"      ⏱  nota nº {historico.numero_nota(chave):<9} {fmt_chave(chave)}")
+
+    if erros:
+        print(_cor("\n   Com erro (verificar):", _VERMELHO))
+        for chave, msg in erros:
+            print(f"      ✘  nota nº {historico.numero_nota(chave):<9} {fmt_chave(chave)}")
             print(f"         {_cor(msg, _VERMELHO)}")
-        print()
-        print(borda)
+    print()
+    print(borda)
 
 
 def _pedir_cnpj_valido(cnpj_invalido: str) -> str:
@@ -387,7 +386,22 @@ def main() -> None:
         "--headless", action="store_true",
         help="Executa o navegador sem janela gráfica",
     )
+    parser.add_argument(
+        "--sem-atualizar", action="store_true",
+        help="Não verifica se há versão nova no GitHub",
+    )
     args = parser.parse_args()
+
+    preparar_console()
+    configurar_log()
+
+    # ── Atualização: aplica a versão nova e reinicia com o código novo ───────
+    # APACN_REINICIADO evita checar de novo logo após reiniciar.
+    if not args.sem_atualizar and not os.environ.get("APACN_REINICIADO"):
+        if verificar_e_atualizar():
+            env = {**os.environ, "APACN_REINICIADO": "1"}
+            comando = [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]
+            sys.exit(subprocess.call(comando, env=env))
 
     config = _carregar_config()
     usuario = cnpj_entidade = senha = None
@@ -400,8 +414,18 @@ def main() -> None:
     def relogin() -> None:
         fazer_login_portal(page, usuario, senha)
 
-    def registrar(chave: str, status: str, msg: str) -> None:
-        historico.registrar(chave, status, cnpj_entidade, msg)
+    def enviar(chaves_envio: list[str], verificar: bool,
+               titulo: str = "ENVIANDO DOAÇÕES") -> dict:
+        """Envia um lote mostrando o painel e gravando o histórico nota a nota."""
+        with PainelEnvio(len(chaves_envio), titulo) as painel:
+            def progresso(chave: str, status: str, msg: str) -> None:
+                if status in (historico.STATUS_DOADA, historico.STATUS_FORA_PRAZO):
+                    historico.registrar(chave, status, cnpj_entidade, msg)
+                painel.atualizar(chave, status, msg)
+
+            return doar_lote(page, cnpj_entidade, chaves_envio,
+                             verificar_cnpj=verificar, relogin=relogin,
+                             ao_progresso=progresso)
 
     try:
         while True:
@@ -451,16 +475,11 @@ def main() -> None:
                         _salvar_config(config)
 
             # ── Doação (com retry em caso de CNPJ inválido ou limite de erros) ─
-            _tela_processando(len(chaves))
             chaves_lote = list(chaves)
             resultado = None
 
             while True:
-                rodada = doar_lote(
-                    page, cnpj_entidade, chaves_lote,
-                    verificar_cnpj=not cnpj_verificado,
-                    relogin=relogin, ao_registrar=registrar,
-                )
+                rodada = enviar(chaves_lote, verificar=not cnpj_verificado)
                 resultado = _acumular(resultado, rodada)
 
                 # CNPJ rejeitado → pede novo CNPJ e reprocessa as mesmas chaves
@@ -469,7 +488,6 @@ def main() -> None:
                     config["cnpj_entidade"] = cnpj_entidade
                     _salvar_config(config)
                     chaves_lote = rodada["chaves_com_erro"]
-                    _tela_processando(len(chaves_lote))
                     continue
 
                 # Muitos erros seguidos → pergunta ao operador se continua
@@ -479,7 +497,6 @@ def main() -> None:
                     if _tela_limite_erros(n_com_erro, n_restantes):
                         chaves_lote = rodada["chaves_com_erro"]
                         cnpj_verificado = True
-                        _tela_processando(len(chaves_lote))
                         continue
                     break   # operador optou por não continuar
 
@@ -487,11 +504,7 @@ def main() -> None:
                 break
 
             # ── Resultado ────────────────────────────────────────────────
-            _tela_resultado(
-                resultado["sucesso"],
-                resultado["erro"],
-                resultado["erros_com_mensagem"],
-            )
+            _tela_resultado(resultado)
 
             # Notas fora do prazo não entram aqui: não há o que relançar.
             if resultado["chaves_com_erro"]:
@@ -508,22 +521,9 @@ def main() -> None:
         if not chaves_retry:
             houve_erro_geral = False
         elif pw is not None:
-            _limpar_tela()
-            print(_cor("=" * 62, _AZUL))
-            print(_cor("   RELANÇANDO NOTAS COM ERRO", _NEGRITO))
-            print(_cor("=" * 62, _AZUL))
-            print(f"\n   Tentando novamente {len(chaves_retry)} nota(s) que deram erro...\n")
-
-            _tela_processando(len(chaves_retry))
-            resultado_retry = doar_lote(
-                page, cnpj_entidade, chaves_retry, verificar_cnpj=not cnpj_verificado,
-                relogin=relogin, ao_registrar=registrar,
-            )
-            _tela_resultado(
-                resultado_retry["sucesso"],
-                resultado_retry["erro"],
-                resultado_retry["erros_com_mensagem"],
-            )
+            resultado_retry = enviar(chaves_retry, verificar=not cnpj_verificado,
+                                     titulo="RELANÇANDO NOTAS COM ERRO")
+            _tela_resultado(resultado_retry)
             if not resultado_retry["chaves_com_erro"]:
                 houve_erro_geral = False   # todos os erros foram recuperados
 

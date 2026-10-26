@@ -2,7 +2,7 @@
 
 Sistema de coleta de notas fiscais do Paraná via leitor de QR code/código de barras e envio automático para doação no portal **Nota Paraná**.
 
-Inicializar sempre pelo arquivo inicia.bat — ele também verifica se há versão nova no GitHub e atualiza o programa com um único **S**.
+Inicializar sempre pelo arquivo inicia.bat. Ao abrir, o próprio programa verifica se há versão nova no GitHub e se atualiza com um único **S**.
 
 
 ## Visão geral do fluxo
@@ -63,7 +63,7 @@ python main.py --headless
 
 ## Como usar o programa
 
-1. Execute `inicia.bat`. Se houver versão nova, confirme com **S** (ou ENTER).
+1. Execute `inicia.bat`. Se houver versão nova, confirme com **S** (ou ENTER); o programa se atualiza e reinicia sozinho.
 2. No menu, escolha **1 – Lançar notas**.
 3. Informe o **CPF**, o **CNPJ da entidade** e a **senha** do portal Nota Paraná.
    - CPF e CNPJ são pré-preenchidos com os valores da última execução — pressione ENTER para manter.
@@ -71,7 +71,7 @@ python main.py --headless
 4. Aponte o leitor USB para o QR code ou código de barras de cada nota — ele lê e registra automaticamente.
 5. Para **encerrar a coleta**: leia um código com o texto `FIM`, ou pressione **ENTER** com o campo vazio.
 6. Revise a lista exibida e confirme digitando **S** + ENTER.
-7. Aguarde o envio automático. Ao final, um aviso mostra quantas notas foram doadas.
+7. Aguarde o envio automático. A tela de envio mostra barra de progresso, contadores (doadas, fora do prazo, com erro), tempo restante e as últimas notas. Ao final, o resumo separa as notas fora do prazo (normal) das notas com erro (verificar).
 8. Pressione ENTER para voltar ao menu: **1** lança mais notas (sem refazer login), **0** encerra.
 
 ---
@@ -92,12 +92,22 @@ um HTML em `relatorios/`, que abre automaticamente no navegador. O botão
 
 ## Atualização automática
 
-O `inicia.bat` executa `atualizador.py` antes do programa:
+Ao iniciar, o `main.py` chama o `atualizador.py` (não depende do `inicia.bat`):
 
 1. Baixa a versão do branch `main` do GitHub e compara com os arquivos locais.
 2. Havendo diferença, mostra a última alteração e os arquivos afetados e pergunta **Atualizar agora? [S/n]**.
-3. Atualiza os arquivos do programa; se o `requirements.txt` mudou, reinstala as dependências.
-4. `config.json`, `historico_doacoes.csv`, `relatorios/` e `venv/` **nunca são alterados**.
+3. Atualiza os arquivos do programa; se o `requirements.txt` mudou, reinstala as dependências. Em seguida o programa reinicia já na versão nova.
+4. `config.json`, `historico_doacoes.csv`, `relatorios/`, `logs/` e `venv/` **nunca são alterados**.
+5. O `inicia.bat` não é atualizado automaticamente (o Windows lê o `.bat` enquanto ele roda; trocá-lo no meio causaria erros). Ele é só o lançador e raramente muda.
+
+Para pular a verificação: `python main.py --sem-atualizar`.
+
+---
+
+## Log técnico
+
+Durante o envio a tela mostra apenas o painel de progresso. O registro técnico completo
+de cada execução fica em `logs/AAAA-MM-DD.log`, útil para suporte.
 
 Sem internet, a verificação é ignorada e o programa segue normalmente.
 
@@ -145,8 +155,9 @@ A chave pode ser fornecida com espaços ou hífens entre grupos — o sistema no
 
 ```
 automatizaAPACN/
-├── inicia.bat           # Inicializador (ambiente virtual + atualização + programa)
+├── inicia.bat           # Inicializador (ambiente virtual + programa)
 ├── atualizador.py       # Verifica e aplica versão nova do GitHub
+├── painel.py            # Painel de envio e configuração do log
 ├── main.py              # Ponto de entrada – menu e fluxo completo
 ├── qr_collector.py      # Coleta via leitor HID + validação de chaves
 ├── notaparana_bot.py    # Automação Playwright do portal Nota Paraná
@@ -155,11 +166,12 @@ automatizaAPACN/
 ├── config.json          # CPF e CNPJ salvos entre execuções (gerado automaticamente)
 ├── historico_doacoes.csv  # Histórico das notas processadas neste computador (gerado)
 ├── relatorios/          # Relatórios HTML gerados
+├── logs/                # Log técnico por dia
 ├── .gitignore
 └── README.md
 ```
 
-> `config.json`, `historico_doacoes.csv` e `relatorios/` são gerados automaticamente e estão no `.gitignore`.
+> `config.json`, `historico_doacoes.csv`, `relatorios/` e `logs/` são gerados automaticamente e estão no `.gitignore`.
 
 ---
 

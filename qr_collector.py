@@ -94,15 +94,47 @@ def validar_chave(chave: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # Leitura de input sem depender de ENTER do leitor
 # ---------------------------------------------------------------------------
+# O leitor "digita" a leitura inteira em poucos milissegundos, então uma pausa
+# curta (timeout) marca o fim da leitura. Uma pessoa digitando faz pausas bem
+# maiores; por isso, enquanto o campo tiver só dígitos e menos de 44, a leitura
+# só termina com ENTER (ou ao completar os 44 dígitos e pausar).
+
+_BACKSPACE = ("\x08", "\x7f")
+
+
+def _leitura_completa(buffer: list[str]) -> bool:
+    """True se o conteúdo já pode ser uma leitura do leitor (fim por pausa)."""
+    texto = "".join(buffer)
+    if re.search(r"[^\d\s\-]", texto):   # URL de QR code ou texto ("FIM")
+        return True
+    return len(re.sub(r"\D", "", texto)) >= 44
+
+
+def _tratar_tecla(ch: str, buffer: list[str]) -> bool:
+    """Atualiza o buffer com a tecla e ecoa na tela. Retorna True no ENTER."""
+    if ch in ("\r", "\n"):
+        return True
+    if ch == "\x03":                       # Ctrl+C no modo caractere a caractere
+        raise KeyboardInterrupt
+    if ch in _BACKSPACE:
+        if buffer:
+            buffer.pop()
+            sys.stdout.write("\b \b")
+    elif ch.isprintable():
+        buffer.append(ch)
+        sys.stdout.write(ch)
+    sys.stdout.flush()
+    return False
+
 
 if os.name == "nt":
     import msvcrt
 
     def _ler_scan(prompt: str = "   > ", timeout: float = 0.15) -> str:
         """
-        Lê caracteres do leitor um a um (Windows/msvcrt).
-        Encerra quando recebe CR/LF ou após `timeout` segundos sem novo caractere.
-        Não exige que o leitor envie ENTER.
+        Lê caracteres um a um (Windows/msvcrt), mostrando o que é digitado.
+        Encerra com CR/LF ou, se a leitura parecer completa, após `timeout`
+        segundos sem novo caractere. Não exige que o leitor envie ENTER.
         """
         sys.stdout.write(prompt)
         sys.stdout.flush()
@@ -111,18 +143,14 @@ if os.name == "nt":
 
         while True:
             if msvcrt.kbhit():
-                ch = msvcrt.getwch()
-                if ch in ("\r", "\n"):
+                if _tratar_tecla(msvcrt.getwch(), buffer):
                     break
-                if ch == "\x08" and buffer:   # backspace
-                    buffer.pop()
-                else:
-                    buffer.append(ch)
                 ultimo = time.time()
             else:
-                if buffer and ultimo is not None:
-                    if time.time() - ultimo >= timeout:
-                        break
+                if (buffer and ultimo is not None
+                        and time.time() - ultimo >= timeout
+                        and _leitura_completa(buffer)):
+                    break
                 time.sleep(0.005)
 
         print()
@@ -136,8 +164,9 @@ else:
 
     def _ler_scan(prompt: str = "   > ", timeout: float = 0.15) -> str:
         """
-        Lê caracteres do leitor um a um (Linux/macOS via termios).
-        Encerra quando recebe CR/LF ou após `timeout` segundos sem novo caractere.
+        Lê caracteres um a um (Linux/macOS via termios), mostrando o que é
+        digitado. Encerra com CR/LF ou, se a leitura parecer completa, após
+        `timeout` segundos sem novo caractere.
         """
         sys.stdout.write(prompt)
         sys.stdout.flush()
@@ -150,16 +179,10 @@ else:
             while True:
                 pronto, _, _ = select.select([sys.stdin], [], [], timeout)
                 if pronto:
-                    ch = sys.stdin.read(1)
-                    if ch in ("\r", "\n"):
+                    if _tratar_tecla(sys.stdin.read(1), buffer):
                         break
-                    if ch == "\x7f" and buffer:   # backspace
-                        buffer.pop()
-                    else:
-                        buffer.append(ch)
-                else:
-                    if buffer:   # timeout sem novo char → leitura completa
-                        break
+                elif buffer and _leitura_completa(buffer):
+                    break   # pausa após leitura completa → fim da leitura
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, config_orig)
 
@@ -191,6 +214,7 @@ def _cabecalho(total: int, invalidas: int) -> None:
     print(_cor("-" * 62, _AZUL))
     print("   Aponte o leitor para o QR code ou código de barras da nota.")
     print("   Para FINALIZAR: leia um código 'FIM' ou tecle ENTER vazio.")
+    print("   Digitação manual: digite os 44 números e tecle ENTER.")
     print(_cor("=" * 62, _AZUL))
     print()
 

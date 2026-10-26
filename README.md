@@ -149,6 +149,8 @@ Cada código escaneado passa pelas seguintes verificações antes de ser aceito:
 Leituras duplicadas ou inválidas são descartadas com aviso imediato na tela.
 A chave pode ser fornecida com espaços ou hífens entre grupos — o sistema normaliza automaticamente.
 
+**Digitação manual:** digite os 44 números da chave (eles aparecem na tela) e tecle **ENTER**. Com o leitor USB não é preciso ENTER: a leitura termina sozinha.
+
 ---
 
 ## Estrutura dos arquivos

@@ -16,7 +16,7 @@ Inicializar sempre pelo arquivo inicia.bat. Ao abrir, o próprio programa verifi
 1. **Credenciais** – No primeiro lançamento o programa solicita CPF, CNPJ da entidade e senha. CPF e CNPJ são salvos localmente para a próxima execução; a senha nunca é salva.
 2. **Coleta** – O operador passa o leitor USB nos QR codes/códigos de barras das notas. Cada chave é validada em tempo real, e notas que já constam no histórico deste computador são recusadas na leitura.
 3. **Confirmação** – O operador revisa a lista antes de prosseguir.
-4. **Doação automática** – O script abre o navegador, faz login no portal e processa cada nota:
+4. **Doação automática** – O script confere a internet (e o acesso ao site do Nota Paraná), abre o navegador, faz login no portal e processa cada nota:
    - **1ª doação:** preenche o CNPJ da entidade, aguarda a verificação automática do portal (HTTP 200 = ok, HTTP 400 = CNPJ inválido) e, se válido, lança a nota.
    - **Demais doações:** o CNPJ já está preenchido; o script vai direto ao preenchimento da chave e ao clique no botão de doação.
    - Cada doação aguarda a confirmação do portal (`_mensagem: "Documento fiscal doado com sucesso!"`) antes de avançar para a próxima.
@@ -76,6 +76,23 @@ python main.py --headless
 
 ---
 
+## Sons, internet e notas guardadas
+
+- **Sons:** a cada leitura, um bip agudo e curto = nota aceita; dois bips graves = nota recusada
+  (repetida, já doada, código ruim). O resumo final também toca um som de sucesso ou de falha.
+- **Internet:** antes de abrir o navegador o programa confere a conexão. Se não houver internet, ou se o
+  site do Nota Paraná não responder, explica o que fazer e pergunta se quer tentar de novo (ENTER) ou voltar
+  ao menu (N). As notas lidas não se perdem.
+- **Notas guardadas:** cada nota lida é gravada na hora em `notas_pendentes.json`. Se o programa fechar, o
+  computador desligar ou o lançamento der erro, ao escolher **1 – Lançar notas** o programa avisa que há notas
+  guardadas e pergunta se quer continuar com elas (**S**) ou descartá-las (**N**). Notas já doadas (ou fora do
+  prazo) saem da lista sozinhas.
+- **Mensagens:** erros do portal e avisos técnicos aparecem em frases simples, com a orientação do que fazer.
+  O texto técnico original continua em `logs/AAAA-MM-DD.log`. Se o portal recusar o login, a mensagem pede para
+  conferir o **CPF e a senha** (o portal não informa qual dos dois está errado).
+
+---
+
 ## Histórico e relatório
 
 Toda nota **doada** ou **recusada por prazo expirado** é gravada em `historico_doacoes.csv`
@@ -109,7 +126,7 @@ Para pular a verificação: `python main.py --sem-atualizar`.
 Durante o envio a tela mostra apenas o painel de progresso. O registro técnico completo
 de cada execução fica em `logs/AAAA-MM-DD.log`, útil para suporte.
 
-Sem internet, a verificação é ignorada e o programa segue normalmente.
+Sem internet, a verificação de atualização é ignorada e o programa segue normalmente.
 
 ---
 
@@ -164,16 +181,21 @@ automatizaAPACN/
 ├── qr_collector.py      # Coleta via leitor HID + validação de chaves
 ├── notaparana_bot.py    # Automação Playwright do portal Nota Paraná
 ├── historico.py         # Histórico local e relatório HTML
+├── recuperacao.py       # Guarda as notas lidas até terem resultado (notas_pendentes.json)
+├── rede.py              # Confere a internet e o acesso ao portal antes do navegador
+├── som.py               # Bips de sucesso e de falha
+├── mensagens.py         # Traduz erros técnicos para frases simples
 ├── requirements.txt     # Dependências Python
 ├── config.json          # CPF e CNPJ salvos entre execuções (gerado automaticamente)
 ├── historico_doacoes.csv  # Histórico das notas processadas neste computador (gerado)
+├── notas_pendentes.json   # Notas lidas ainda sem resultado (gerado)
 ├── relatorios/          # Relatórios HTML gerados
 ├── logs/                # Log técnico por dia
 ├── .gitignore
 └── README.md
 ```
 
-> `config.json`, `historico_doacoes.csv`, `relatorios/` e `logs/` são gerados automaticamente e estão no `.gitignore`.
+> `config.json`, `historico_doacoes.csv`, `notas_pendentes.json`, `relatorios/` e `logs/` são gerados automaticamente e estão no `.gitignore`.
 
 ---
 

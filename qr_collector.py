@@ -17,7 +17,9 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
+
+import som
 
 # ---------------------------------------------------------------------------
 # Cores ANSI (funcionam em Linux/macOS; no Windows requer terminal moderno)
@@ -77,16 +79,16 @@ def _calcular_dv(chave43: str) -> int:
 def validar_chave(chave: str) -> tuple[bool, str]:
     """Retorna (True, '') se válida, ou (False, motivo) se inválida."""
     if not re.match(r'^\d{44}$', chave):
-        return False, "precisa ter exatamente 44 dígitos numéricos"
+        return False, "o código está incompleto ou tem números a mais"
 
     if chave[:2] not in _CUFS_VALIDOS:
-        return False, f"código de estado '{chave[:2]}' não é o Paraná (esperado 41)"
+        return False, "esta nota não é do Paraná"
 
     if chave[20:22] not in ("55", "65"):
-        return False, f"modelo '{chave[20:22]}' desconhecido (esperado 55=NF-e, 65=NFC-e)"
+        return False, "este código não é de uma nota fiscal"
 
     if _calcular_dv(chave[:43]) != int(chave[43]):
-        return False, "dígito verificador inválido (código corrompido?)"
+        return False, "o código foi lido com defeito; passe o leitor de novo"
 
     return True, ""
 
@@ -213,8 +215,9 @@ def _cabecalho(total: int, invalidas: int) -> None:
         print(f"   Leituras inválidas: {_cor(str(invalidas), _VERMELHO)}")
     print(_cor("-" * 62, _AZUL))
     print("   Aponte o leitor para o QR code ou código de barras da nota.")
-    print("   Para FINALIZAR: leia um código 'FIM' ou tecle ENTER vazio.")
-    print("   Digitação manual: digite os 44 números e tecle ENTER.")
+    print("   Quando terminar: aperte ENTER sem digitar nada (ou leia um código 'FIM').")
+    print("   Sem o leitor: digite os 44 números da nota e aperte ENTER.")
+    print("   Um bip agudo = nota aceita.  Dois bips graves = nota recusada.")
     print(_cor("=" * 62, _AZUL))
     print()
 
@@ -225,21 +228,42 @@ def _cabecalho(total: int, invalidas: int) -> None:
 
 def coletar_qr_codes(
     ja_processadas: Optional[dict[str, tuple[str, datetime]]] = None,
+    iniciais: Optional[list[str]] = None,
+    ao_registrar: Optional[Callable[[str], None]] = None,
 ) -> list[str]:
     """
     Aguarda leituras do leitor de código de barras/QR (entrada via teclado HID).
 
     ja_processadas → mapa chave → (status, data) do histórico local; essas
                      notas são recusadas na leitura (já doadas ou fora do prazo).
+    iniciais       → chaves recuperadas de uma leitura anterior; já entram na lista.
+    ao_registrar   → chamada com cada chave nova aceita (usada para guardá-la
+                     em disco na hora, caso o programa feche).
 
     Retorna lista de chaves de acesso válidas e únicas.
     """
     ja_processadas = ja_processadas or {}
-    chaves: list[str] = []
+    chaves: list[str] = list(dict.fromkeys(iniciais or []))
     invalidas: int = 0
-    historico: list[str] = []   # log de mensagens de feedback
+    mensagens: list[str] = []   # feedback mostrado abaixo do cabeçalho
 
-    _cabecalho(0, 0)
+    if chaves:
+        mensagens.append(_cor(
+            f"  ↺  {len(chaves)} nota(s) recuperada(s) da leitura anterior.", _AZUL))
+
+    def mostrar(msg: str, cor: str, aceita: bool) -> None:
+        mensagens.append(_cor(msg, cor))
+        _cabecalho(len(chaves), invalidas)
+        for linha in mensagens[-15:]:   # mostra as últimas 15 mensagens
+            print(linha)
+        if aceita:
+            som.sucesso()
+        else:
+            som.falha()
+
+    _cabecalho(len(chaves), 0)
+    for linha in mensagens:
+        print(linha)
 
     while True:
         try:
@@ -256,56 +280,33 @@ def coletar_qr_codes(
 
         if chave is None:
             invalidas += 1
-            msg = _cor(f"  ✗  Código não reconhecido: {entrada[:60]}", _VERMELHO)
-            historico.append(msg)
-            _cabecalho(len(chaves), invalidas)
-            for linha in historico[-15:]:   # mostra as últimas 15 mensagens
-                print(linha)
+            mostrar("  ✗  Não consegui ler este código. Passe o leitor de novo.",
+                    _VERMELHO, False)
             continue
 
         if chave in chaves:
-            msg = _cor(
-                f"  ⚠  Nota já registrada (ignorada): {_fmt(chave)}",
-                _AMARELO
-            )
-            historico.append(msg)
-            _cabecalho(len(chaves), invalidas)
-            for linha in historico[-15:]:
-                print(linha)
+            mostrar(f"  ⚠  Esta nota já foi lida (não conta duas vezes): {_fmt(chave)}",
+                    _AMARELO, False)
             continue
 
         if chave in ja_processadas:
             status, quando = ja_processadas[chave]
-            situacao = "já doada" if status == "doada" else "recusada por prazo"
-            msg = _cor(
-                f"  ⚠  Nota {situacao} em {quando:%d/%m/%Y} (ignorada): {_fmt(chave)}",
-                _AMARELO
-            )
-            historico.append(msg)
-            _cabecalho(len(chaves), invalidas)
-            for linha in historico[-15:]:
-                print(linha)
+            situacao = ("já foi doada" if status == "doada"
+                        else "já foi enviada, mas estava fora do prazo")
+            mostrar(f"  ⚠  Esta nota {situacao} em {quando:%d/%m/%Y} "
+                    f"(não será enviada de novo): {_fmt(chave)}", _AMARELO, False)
             continue
 
         valida, motivo = validar_chave(chave)
         if not valida:
             invalidas += 1
-            msg = _cor(f"  ✗  Chave inválida ({motivo}): {_fmt(chave)}", _VERMELHO)
-            historico.append(msg)
-            _cabecalho(len(chaves), invalidas)
-            for linha in historico[-15:]:
-                print(linha)
+            mostrar(f"  ✗  Nota recusada, {motivo}: {_fmt(chave)}", _VERMELHO, False)
             continue
 
         chaves.append(chave)
-        msg = _cor(
-            f"  ✓  #{len(chaves):>3}  {_fmt(chave)}",
-            _VERDE
-        )
-        historico.append(msg)
-        _cabecalho(len(chaves), invalidas)
-        for linha in historico[-15:]:
-            print(linha)
+        if ao_registrar:
+            ao_registrar(chave)
+        mostrar(f"  ✓  #{len(chaves):>3}  {_fmt(chave)}", _VERDE, True)
 
     return chaves
 

@@ -202,7 +202,7 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
             state="visible", timeout=TIMEOUT_LOGIN_ERRO
         )
         raise CredenciaisInvalidasError(
-            "Usuário ou senha incorretos. Verifique e tente novamente."
+            "O portal não aceitou o usuário (CPF) ou a senha."
         )
     except PlaywrightTimeout:
         pass
@@ -224,7 +224,7 @@ def _fazer_login(page: Page, usuario: str, senha: str) -> None:
                 state="visible", timeout=TIMEOUT_LOGIN_ERRO
             )
             raise CredenciaisInvalidasError(
-                "Usuário ou senha incorretos após relogin."
+                "O portal não aceitou o usuário (CPF) ou a senha."
             )
         except PlaywrightTimeout:
             pass

@@ -30,6 +30,7 @@ logs/
 chaves_coletadas.json
 resultado_doacao.json
 historico_doacoes.csv
+notas_pendentes.json
 relatorios/
 
 # Editor

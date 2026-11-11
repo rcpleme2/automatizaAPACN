@@ -17,6 +17,7 @@ from collections import deque
 from datetime import date
 from pathlib import Path
 
+from mensagens import traduzir_aviso, traduzir_erro
 from qr_collector import _cor, _VERDE, _VERMELHO, _AMARELO, _AZUL, _NEGRITO
 
 PASTA_LOGS = Path(__file__).parent / "logs"
@@ -47,7 +48,19 @@ class _ParaPainel(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         if _painel_ativo is not None:
-            _painel_ativo.aviso(record.getMessage().strip())
+            frase = traduzir_aviso(record.getMessage().strip())
+            if frase:
+                _painel_ativo.aviso(frase)
+
+
+class _ParaConsole(logging.Handler):
+    """Mostra no console avisos já traduzidos para frases simples."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        frase = traduzir_aviso(record.getMessage().strip())
+        if frase:
+            sys.stdout.write(f"   {frase}\n")
+            sys.stdout.flush()
 
 
 def configurar_log() -> Path:
@@ -65,10 +78,12 @@ def configurar_log() -> Path:
         "%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S"))
     raiz.addHandler(em_arquivo)
 
-    no_console = logging.StreamHandler(sys.stdout)
+    # Fora do painel, o operador vê só frases simples; o detalhe técnico
+    # (e qualquer registro marcado com extra={"so_arquivo": True}) fica no arquivo.
+    no_console = _ParaConsole()
     no_console.setLevel(logging.WARNING)
-    no_console.setFormatter(logging.Formatter("   %(message)s"))
-    no_console.addFilter(lambda _: _painel_ativo is None)
+    no_console.addFilter(lambda r: _painel_ativo is None
+                         and not getattr(r, "so_arquivo", False))
     raiz.addHandler(no_console)
 
     # Só WARNING: os erros de cada nota (ERROR) já aparecem na lista do painel
@@ -136,10 +151,10 @@ class PainelEnvio:
             linha = _cor(f"✔  {n:>3}  {nota}", _VERDE) + _cor(f"  …{chave[-8:]}", _CINZA)
         elif status == "fora_do_prazo":
             self.fora_prazo += 1
-            linha = _cor(f"⏱  {n:>3}  {nota}", _AMARELO) + _cor("  prazo expirado", _CINZA)
+            linha = _cor(f"⏱  {n:>3}  {nota}", _AMARELO) + _cor("  prazo já passou", _CINZA)
         else:
             self.erros += 1
-            linha = _cor(f"✘  {n:>3}  {nota}", _VERMELHO) + _cor(f"  {msg[:45]}", _CINZA)
+            linha = _cor(f"✘  {n:>3}  {nota}", _VERMELHO) + _cor(f"  {traduzir_erro(msg)[:75]}", _CINZA)
         self.ultimas.appendleft(linha)
         self.atual = None
         self._desenhar()
@@ -163,7 +178,7 @@ class PainelEnvio:
 
         linhas = [
             _cor("=" * 62, _AZUL),
-            _cor(f"   {self.titulo}", _NEGRITO) + _cor("   (não feche esta janela)", _CINZA),
+            _cor(f"   {self.titulo}", _NEGRITO) + _cor("   (não feche esta janela, aguarde)", _CINZA),
             _cor("=" * 62, _AZUL),
             "",
             f"   {barra}  {_cor(f'{feitas}/{self.total}', _NEGRITO)}",
@@ -171,9 +186,9 @@ class PainelEnvio:
             "",
             _cor(f"   ✔ Doadas         {self.doadas:>4}", _VERDE),
             _cor(f"   ⏱ Fora do prazo  {self.fora_prazo:>4}", _AMARELO)
-            + _cor("   normal, não são relançadas", _CINZA),
-            _cor(f"   ✘ Com erro       {self.erros:>4}", _VERMELHO)
-            + _cor("   relançadas ao sair do programa", _CINZA),
+            + _cor("   o prazo já passou, não dá mais para doar", _CINZA),
+            _cor(f"   ✘ Não doadas     {self.erros:>4}", _VERMELHO)
+            + _cor("   o programa tenta de novo ao sair", _CINZA),
             "",
             _cor("-" * 62, _AZUL),
         ]

@@ -7,12 +7,15 @@ Fluxo:
   1. Menu principal:
        1 = Lançar notas   2 = Relatório do histórico   0 = Sair
   2. Lançar notas:
+       0. Se sobraram notas lidas de uma vez anterior (programa fechado ou erro
+          no lançamento), oferece continuar com elas (recuperacao.py).
        a. Na primeira vez, solicita usuário, CNPJ da entidade e senha
           (esta última não é salva). Usuário e CNPJ vêm pré-preenchidos.
        b. Coleta QR codes via leitor USB (notas já doadas neste computador
           são recusadas na leitura).
        c. Confirmação do operador.
-       d. Abre o navegador e faz login (apenas no primeiro lote).
+       d. Confere a internet (rede.py), abre o navegador e faz login (apenas
+          no primeiro lote).
           Se as credenciais estiverem erradas, pede novamente SEM fechar o navegador.
        e. Doação automática; cada resultado definitivo vai para o histórico.
           Se a sessão expirar, o login é refeito automaticamente.
@@ -31,6 +34,7 @@ Uso:
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -38,8 +42,12 @@ from datetime import date, datetime
 from pathlib import Path
 
 import historico
+import rede
+import recuperacao
+import som
 from atualizador import verificar_e_atualizar
-from painel import PainelEnvio, configurar_log, preparar_console
+from mensagens import traduzir_erro
+from painel import PASTA_LOGS, PainelEnvio, configurar_log, preparar_console
 from qr_collector import coletar_qr_codes, _fmt as fmt_chave, _cor, \
     _VERDE, _VERMELHO, _AMARELO, _AZUL, _NEGRITO, _limpar_tela
 from notaparana_bot import (
@@ -54,6 +62,8 @@ from notaparana_bot import (
 
 # Arquivo de configuração local (não versionado)
 _CONFIG_PATH = Path(__file__).parent / "config.json"
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -110,17 +120,17 @@ def _tela_credenciais(config: dict) -> tuple[str, str, str]:
     print(_cor("=" * 62, _AZUL))
     print()
     print("   Preencha os dados abaixo.")
-    print("   Campos com [ ] já possuem valor salvo — pressione ENTER para manter.")
+    print("   O que aparece entre [ ] já está salvo. Se estiver certo, só aperte ENTER.")
     print()
 
     # Usuário
     usuario = ""
     while not usuario:
         usuario = so_digitos(
-            _input_com_padrao("Usuário (CPF)", config.get("usuario", ""))
+            _input_com_padrao("Usuário do portal (seu CPF)", config.get("usuario", ""))
         )
         if not usuario:
-            print("   Campo obrigatório.\n")
+            print("   Este campo precisa ser preenchido.\n")
 
     # CNPJ da entidade
     cnpj_entidade = ""
@@ -130,15 +140,16 @@ def _tela_credenciais(config: dict) -> tuple[str, str, str]:
         )
         cnpj_entidade = so_digitos(raw)
         if len(cnpj_entidade) != 14:
-            print(f"   CNPJ deve ter 14 dígitos (informado: {len(cnpj_entidade)}).\n")
+            print(f"   O CNPJ precisa ter 14 números e você digitou {len(cnpj_entidade)}. "
+                  "Confira e digite de novo.\n")
 
     # Senha (nunca salva)
     print()
     senha = ""
     while not senha:
-        senha = input("   Senha: ")
+        senha = input("   Senha do portal: ")
         if not senha:
-            print("   Campo obrigatório.\n")
+            print("   Este campo precisa ser preenchido.\n")
 
     return usuario, cnpj_entidade, senha
 
@@ -150,23 +161,26 @@ def _tela_login_invalido(usuario: str) -> tuple[str, str]:
     """
     _limpar_tela()
     print(_cor("=" * 62, _VERMELHO))
-    print(_cor("   LOGIN FALHOU – CREDENCIAIS INVÁLIDAS", _VERMELHO + _NEGRITO))
+    print(_cor("   NÃO FOI POSSÍVEL ENTRAR NO PORTAL", _VERMELHO + _NEGRITO))
     print(_cor("=" * 62, _VERMELHO))
     print()
-    print("   Usuário ou senha incorretos.")
-    print("   Informe as credenciais corretas abaixo.")
-    print("   O navegador permanece aberto.")
+    print("   O portal não aceitou o usuário (CPF) ou a senha.")
+    print("   Ele não informa qual dos dois está errado, então confira os dois:")
+    print("     • o CPF: o que aparece entre [ ] é o último que foi usado;")
+    print("     • a senha: veja se as letras maiúsculas e minúsculas estão certas.")
+    print()
+    print("   Digite novamente abaixo. Não feche a janela do navegador.")
     print()
 
-    novo_usuario_raw = _input_com_padrao("Usuário (CPF)", usuario).strip()
+    novo_usuario_raw = _input_com_padrao("Usuário do portal (seu CPF)", usuario).strip()
     novo_usuario = so_digitos(novo_usuario_raw) if novo_usuario_raw else usuario
 
     print()
     nova_senha = ""
     while not nova_senha:
-        nova_senha = input("   Senha: ")
+        nova_senha = input("   Senha do portal: ")
         if not nova_senha:
-            print("   Campo obrigatório.\n")
+            print("   Este campo precisa ser preenchido.\n")
 
     return novo_usuario, nova_senha
 
@@ -181,11 +195,11 @@ def _tela_menu(sessao_ativa: bool, pendentes: int) -> str:
     print(_cor("=" * 62, _AZUL))
     print(_cor("   NOTA PARANÁ – DOAÇÃO AUTOMÁTICA", _NEGRITO))
     print(_cor("=" * 62, _AZUL))
-    status = _cor("conectado", _VERDE) if sessao_ativa else "não iniciada"
-    print(f"   Sessão no portal : {status}")
+    status = _cor("conectado", _VERDE) if sessao_ativa else "ainda não conectado"
+    print(f"   Portal Nota Paraná : {status}")
     if pendentes:
-        print(f"   Notas com erro   : {_cor(str(pendentes), _AMARELO)}"
-              " (serão relançadas ao sair)")
+        print(f"   Notas não doadas   : {_cor(str(pendentes), _AMARELO)}"
+              " (o programa tenta de novo ao sair)")
     print(_cor("-" * 62, _AZUL))
     print(f"   {_cor('1', _NEGRITO)}  Lançar notas")
     print(f"   {_cor('2', _NEGRITO)}  Relatório do histórico de doações")
@@ -195,7 +209,7 @@ def _tela_menu(sessao_ativa: bool, pendentes: int) -> str:
         resp = input("\n   Sua escolha: ").strip()
         if resp in ("1", "2", "0"):
             return resp
-        print("   Digite 1, 2 ou 0.")
+        print("   Digite apenas 1, 2 ou 0 e aperte ENTER.")
 
 
 def _ler_data(label: str, padrao: date) -> date:
@@ -204,7 +218,7 @@ def _ler_data(label: str, padrao: date) -> date:
         try:
             return datetime.strptime(raw, "%d/%m/%Y").date()
         except ValueError:
-            print("   Data inválida. Use o formato dd/mm/aaaa.\n")
+            print("   Data inválida. Digite assim: dia/mês/ano, por exemplo 31/12/2025.\n")
 
 
 def _tela_relatorio() -> None:
@@ -241,12 +255,13 @@ def _tela_confirmacao(chaves: list[str]) -> bool:
     print(_cor("=" * 62, _AZUL))
     print(_cor("   CONFIRMAÇÃO – NOTAS PARA DOAÇÃO", _NEGRITO))
     print(_cor("=" * 62, _AZUL))
-    print(f"\n   {_cor(str(len(chaves)), _NEGRITO)} nota(s) serão doadas:\n")
+    print(f"\n   {_cor(str(len(chaves)), _NEGRITO)} nota(s) serão doadas. "
+          "Confira a lista:\n")
     for i, c in enumerate(chaves, 1):
         print(f"   {i:>3}.  {fmt_chave(c)}")
     print()
     print(_cor("-" * 62, _AZUL))
-    print("   S = confirmar  |  N = cancelar")
+    print("   S = sim, doar essas notas  |  N = não, voltar sem doar")
     print(_cor("=" * 62, _AZUL))
     while True:
         resp = input("\n   Sua escolha [S/N]: ").strip().upper()
@@ -254,7 +269,7 @@ def _tela_confirmacao(chaves: list[str]) -> bool:
             return True
         if resp in ("N", "NAO", "NÃO", ""):
             return False
-        print("   Por favor, digite S ou N.")
+        print("   Digite S para sim ou N para não.")
 
 
 def _tela_resultado(resultado: dict) -> None:
@@ -266,13 +281,13 @@ def _tela_resultado(resultado: dict) -> None:
     erros = [(c, m) for c, m in resultado["erros_com_mensagem"] if c not in set_expiradas]
 
     if erros and doadas:
-        cor, titulo = _AMARELO, "⚠  DOAÇÃO PARCIALMENTE CONCLUÍDA"
+        cor, titulo = _AMARELO, "⚠  ALGUMAS NOTAS NÃO FORAM DOADAS"
     elif erros:
-        cor, titulo = _VERMELHO, "✘  NENHUMA DOAÇÃO FOI REALIZADA"
+        cor, titulo = _VERMELHO, "✘  NENHUMA NOTA FOI DOADA"
     elif doadas:
-        cor, titulo = _VERDE, "✔  DOAÇÃO CONCLUÍDA COM SUCESSO!"
+        cor, titulo = _VERDE, "✔  TUDO CERTO! AS NOTAS FORAM DOADAS"
     else:
-        cor, titulo = _AMARELO, "⏱  NENHUMA NOTA DENTRO DO PRAZO"
+        cor, titulo = _AMARELO, "⏱  AS NOTAS ESTAVAM FORA DO PRAZO"
 
     borda = _cor("=" * 62, cor)
     print(borda)
@@ -281,9 +296,9 @@ def _tela_resultado(resultado: dict) -> None:
     print()
     print(f"   {_cor(f'✔ {doadas:>4}', _VERDE + _NEGRITO)}  nota(s) doada(s)")
     print(f"   {_cor(f'⏱ {len(expiradas):>4}', _AMARELO + _NEGRITO)}  fora do prazo"
-          " (normal, não serão relançadas)")
-    print(f"   {_cor(f'✘ {len(erros):>4}', _VERMELHO + _NEGRITO)}  com erro"
-          + (" (serão relançadas ao sair)" if erros else ""))
+          " (o prazo já passou, não dá mais para doar)")
+    print(f"   {_cor(f'✘ {len(erros):>4}', _VERMELHO + _NEGRITO)}  não doada(s)"
+          + (" (o programa tenta de novo ao sair)" if erros else ""))
 
     if expiradas:
         print(_cor("\n   Fora do prazo:", _AMARELO))
@@ -291,23 +306,28 @@ def _tela_resultado(resultado: dict) -> None:
             print(f"      ⏱  nota nº {historico.numero_nota(chave):<9} {fmt_chave(chave)}")
 
     if erros:
-        print(_cor("\n   Com erro (verificar):", _VERMELHO))
+        print(_cor("\n   Notas que não foram doadas:", _VERMELHO))
         for chave, msg in erros:
             print(f"      ✘  nota nº {historico.numero_nota(chave):<9} {fmt_chave(chave)}")
-            print(f"         {_cor(msg, _VERMELHO)}")
+            print(f"         {_cor(traduzir_erro(msg), _VERMELHO)}")
+            log.info("Detalhe técnico da nota %s: %s", historico.numero_nota(chave), msg)
     print()
     print(borda)
+    if erros or not doadas:
+        som.falha()
+    else:
+        som.sucesso()
 
 
 def _pedir_cnpj_valido(cnpj_invalido: str) -> str:
     """Informa ao operador que o CNPJ foi rejeitado e solicita o CNPJ correto."""
     _limpar_tela()
     print(_cor("=" * 62, _VERMELHO))
-    print(_cor("   CNPJ INVÁLIDO", _VERMELHO + _NEGRITO))
+    print(_cor("   O PORTAL NÃO ACEITOU O CNPJ DA ENTIDADE", _VERMELHO + _NEGRITO))
     print(_cor("=" * 62, _VERMELHO))
-    print(f"\n   O CNPJ informado foi rejeitado pelo portal (HTTP 400).")
-    print(f"   CNPJ recusado: {cnpj_invalido}")
-    print("   Informe o CNPJ correto para prosseguir com as doações.\n")
+    print(f"\n   CNPJ digitado: {cnpj_invalido}")
+    print("   Confira os 14 números e digite o CNPJ certo da entidade.")
+    print("   Depois disso, as notas serão enviadas de novo.\n")
     print(_cor("-" * 62, _VERMELHO))
 
     novo = ""
@@ -315,7 +335,8 @@ def _pedir_cnpj_valido(cnpj_invalido: str) -> str:
         raw = _input_com_padrao("CNPJ correto da entidade (14 dígitos)", "")
         novo = so_digitos(raw)
         if len(novo) != 14:
-            print(f"   CNPJ deve ter 14 dígitos (informado: {len(novo)}).\n")
+            print(f"   O CNPJ precisa ter 14 números e você digitou {len(novo)}. "
+                  "Confira e digite de novo.\n")
     return novo
 
 
@@ -326,20 +347,21 @@ def _tela_limite_erros(n_com_erro: int, n_restantes: int) -> bool:
     """
     _limpar_tela()
     print(_cor("=" * 62, _AMARELO))
-    print(_cor(f"   {LIMITE_ERROS_CHAVE} ERROS CONSECUTIVOS – LOTE INTERROMPIDO",
+    print(_cor(f"   O ENVIO PAROU: {LIMITE_ERROS_CHAVE} NOTAS SEGUIDAS NÃO FORAM DOADAS",
                _AMARELO + _NEGRITO))
     print(_cor("=" * 62, _AMARELO))
-    print(f"\n   As últimas {LIMITE_ERROS_CHAVE} notas enviadas falharam em sequência.")
-    print(f"   {n_com_erro} nota(s) com erro neste lote.")
-    print(f"   {n_restantes} nota(s) ainda não processada(s).")
+    print(f"\n   {n_com_erro} nota(s) não foram doadas e {n_restantes} ainda não foram enviadas.")
     print()
-    print("   Possíveis causas:")
-    print("   • Chaves de acesso inválidas ou já doadas anteriormente")
-    print("   • Problema temporário no portal")
+    print("   O que pode ter acontecido:")
+    print("   • o site do Nota Paraná está lento ou com problemas;")
+    print("   • a internet está instável;")
+    print("   • as notas já tinham sido doadas antes.")
+    print()
+    print("   Nenhuma nota foi perdida: elas continuam guardadas.")
     print()
     print(_cor("-" * 62, _AMARELO))
-    print(f"   S = tentar novamente essas {n_com_erro + n_restantes} nota(s)"
-          "  |  N = encerrar lançamento")
+    print(f"   S = sim, tentar de novo essas {n_com_erro + n_restantes} nota(s)"
+          "  |  N = parar por agora")
     print(_cor("=" * 62, _AMARELO))
     while True:
         resp = input("\n   Sua escolha [S/N]: ").strip().upper()
@@ -347,7 +369,61 @@ def _tela_limite_erros(n_com_erro: int, n_restantes: int) -> bool:
             return True
         if resp in ("N", "NAO", "NÃO", ""):
             return False
-        print("   Por favor, digite S ou N.")
+        print("   Digite S para sim ou N para não.")
+
+
+def _tela_recuperacao(qtd: int) -> bool:
+    """Oferece continuar com notas lidas antes e que ainda não foram doadas."""
+    _limpar_tela()
+    print(_cor("=" * 62, _AMARELO))
+    print(_cor("   HÁ NOTAS GUARDADAS DA ÚLTIMA VEZ", _AMARELO + _NEGRITO))
+    print(_cor("=" * 62, _AMARELO))
+    print(f"\n   {_cor(str(qtd), _NEGRITO)} nota(s) foram lidas antes e ainda não foram doadas.")
+    print("   Isso acontece quando o programa é fechado ou dá algum problema")
+    print("   antes de terminar o envio.")
+    print()
+    print(_cor("-" * 62, _AMARELO))
+    print("   S = sim, continuar com essas notas  |  N = não, descartá-las")
+    print(_cor("=" * 62, _AMARELO))
+    while True:
+        resp = input("\n   Sua escolha [S/N]: ").strip().upper()
+        if resp in ("S", "SIM", ""):
+            return True
+        if resp in ("N", "NAO", "NÃO"):
+            return False
+        print("   Digite S para sim ou N para não.")
+
+
+def _garantir_internet() -> bool:
+    """Confere a conexão antes de abrir o navegador. False = voltar ao menu."""
+    while True:
+        print("\n   Verificando a conexão com a internet...")
+        situacao = rede.diagnosticar()
+        if situacao == rede.OK:
+            return True
+
+        som.falha()
+        _limpar_tela()
+        print(_cor("=" * 62, _VERMELHO))
+        if situacao == rede.SEM_INTERNET:
+            print(_cor("   SEM INTERNET", _VERMELHO + _NEGRITO))
+            print(_cor("=" * 62, _VERMELHO))
+            print("\n   O computador não está conectado à internet.")
+            print("   Confira o cabo de rede ou o Wi-Fi.")
+        else:
+            print(_cor("   SITE DO NOTA PARANÁ NÃO RESPONDE", _VERMELHO + _NEGRITO))
+            print(_cor("=" * 62, _VERMELHO))
+            print("\n   A internet está funcionando, mas o site do Nota Paraná")
+            print("   não respondeu. Ele pode estar fora do ar ou muito lento.")
+            print("   Aguarde alguns minutos.")
+        print("\n   Suas notas lidas continuam guardadas.")
+        print()
+        print(_cor("-" * 62, _VERMELHO))
+        print("   ENTER = tentar de novo  |  N = voltar ao menu")
+        print(_cor("=" * 62, _VERMELHO))
+        resp = input("\n   Sua escolha: ").strip().upper()
+        if resp in ("N", "NAO", "NÃO"):
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +512,15 @@ def main() -> None:
                 _tela_relatorio()
                 continue
 
+            # ── Notas guardadas de uma leitura anterior ───────────────────
+            pendentes = recuperacao.carregar(historico.chaves_ja_processadas())
+            recuperadas: list[str] = []
+            if pendentes:
+                if _tela_recuperacao(len(pendentes)):
+                    recuperadas = pendentes
+                else:
+                    recuperacao.remover(pendentes)
+
             # ── Credenciais (apenas no primeiro lançamento) ───────────────
             if senha is None:
                 usuario, cnpj_entidade, senha = _tela_credenciais(config)
@@ -445,23 +530,32 @@ def main() -> None:
                 _salvar_config(config)
 
             # ── Coleta ────────────────────────────────────────────────────
-            chaves = coletar_qr_codes(historico.chaves_ja_processadas())
+            # Cada nota lida é guardada em disco na hora (ver recuperacao.py)
+            chaves = coletar_qr_codes(historico.chaves_ja_processadas(),
+                                      iniciais=recuperadas,
+                                      ao_registrar=recuperacao.adicionar)
 
             if not chaves:
                 _limpar_tela()
-                print(_cor("   Nenhuma nota registrada.", _AMARELO))
+                print(_cor("   Nenhuma nota foi lida. Voltando ao menu.", _AMARELO))
                 _pausar()
                 continue
 
             # ── Confirmação ───────────────────────────────────────────────
             if not _tela_confirmacao(chaves):
-                print("\n   Lote cancelado pelo operador.")
+                print("\n   Tudo bem, nada foi doado.")
+                print("   As notas lidas continuam guardadas: na próxima vez o programa")
+                print("   pergunta se você quer continuar com elas.")
                 _pausar()
                 continue
 
             # ── Abre navegador (apenas no primeiro lançamento) ────────────
             if pw is None:
-                print("\n   Iniciando sessão no Nota Paraná...")
+                if not _garantir_internet():
+                    print("\n   As notas lidas continuam guardadas.")
+                    _pausar()
+                    continue
+                print("\n   Entrando no portal Nota Paraná. Aguarde...")
                 pw, browser, page = abrir_navegador(headless=args.headless)
 
                 # Login com retry – navegador permanece aberto em caso de erro
@@ -504,6 +598,7 @@ def main() -> None:
                 break
 
             # ── Resultado ────────────────────────────────────────────────
+            recuperacao.carregar(historico.chaves_ja_processadas())   # tira as já doadas
             _tela_resultado(resultado)
 
             # Notas fora do prazo não entram aqui: não há o que relançar.
@@ -522,18 +617,42 @@ def main() -> None:
             houve_erro_geral = False
         elif pw is not None:
             resultado_retry = enviar(chaves_retry, verificar=not cnpj_verificado,
-                                     titulo="RELANÇANDO NOTAS COM ERRO")
+                                     titulo="TENTANDO DE NOVO AS NOTAS NÃO DOADAS")
+            recuperacao.carregar(historico.chaves_ja_processadas())
             _tela_resultado(resultado_retry)
             if not resultado_retry["chaves_com_erro"]:
                 houve_erro_geral = False   # todos os erros foram recuperados
 
+    except KeyboardInterrupt:
+        houve_erro_geral = True
+        print("\n\n   O programa foi interrompido.")
+        print("   As notas lidas e ainda não doadas ficam guardadas.")
+        print("   Ao abrir de novo, o programa oferece continuar de onde parou.")
+    except Exception:
+        # Problema inesperado: explica sem mostrar o erro técnico (que vai ao log)
+        houve_erro_geral = True
+        log.exception("Erro inesperado no lançamento", extra={"so_arquivo": True})
+        som.falha()
+        print()
+        print(_cor("=" * 62, _VERMELHO))
+        print(_cor("   ACONTECEU UM PROBLEMA INESPERADO", _VERMELHO + _NEGRITO))
+        print(_cor("=" * 62, _VERMELHO))
+        print("\n   Não se preocupe: nenhuma nota foi perdida.")
+        print("   As notas lidas e ainda não doadas ficaram guardadas.")
+        print("   Feche esta janela, abra o programa de novo e escolha")
+        print("   continuar com as notas guardadas.")
+        print("\n   Se o problema se repetir, avise o suporte e informe que")
+        print(f"   o registro está em: {PASTA_LOGS}")
     finally:
         # ── Logout e encerramento (só se o navegador foi aberto) ─────────
         if pw is not None:
-            encerrar_sessao(pw, browser, page)
+            try:
+                encerrar_sessao(pw, browser, page)
+            except Exception:
+                log.exception("Falha ao encerrar a sessão", extra={"so_arquivo": True})
             print("\n   Sessão encerrada. Até logo!")
         else:
-            print("\n   Nenhuma sessão iniciada. Até logo!")
+            print("\n   Até logo!")
 
     sys.exit(1 if houve_erro_geral else 0)
 

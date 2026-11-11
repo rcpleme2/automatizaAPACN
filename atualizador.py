@@ -18,6 +18,7 @@ apenas a biblioteca padrão do Python.
 
 import io
 import json
+import logging
 import subprocess
 import sys
 import urllib.request
@@ -98,8 +99,10 @@ def verificar_e_atualizar() -> bool:
     try:
         remotos = _arquivos_remotos(_baixar(URL_ZIP))
     except Exception as exc:
-        print(f"   Não foi possível verificar atualizações ({exc.__class__.__name__}). "
-              "Seguindo com a versão atual.")
+        logging.getLogger(__name__).warning("Falha ao verificar atualização: %s", exc)
+        print("   Não foi possível procurar atualizações agora (sem internet ou "
+              "site fora do ar).")
+        print("   O programa vai continuar normalmente com a versão atual.")
         return False
 
     alterados = _alterados(remotos)
@@ -132,7 +135,9 @@ def verificar_e_atualizar() -> bool:
             destino.parent.mkdir(parents=True, exist_ok=True)
             destino.write_bytes(remotos[relativo])
     except Exception as exc:
-        print(f"   Falha ao gravar arquivos ({exc}). Seguindo com a versão atual.")
+        print("   Não foi possível instalar a atualização. O programa vai continuar "
+              "com a versão atual.")
+        logging.getLogger(__name__).warning("Falha ao gravar atualização: %s", exc)
         return False
 
     if "requirements.txt" in alterados:
